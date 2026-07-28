@@ -33,6 +33,24 @@ A single Automation/Script is used to Install, Uninstall, Reinstall (when brok
 - Retrieve any other required fields, such as installation tokens and variables at the top of the script using Get-NinjaProperty calls.
 - Add the agent installation and uninstallation script logic within their respective functions.
 
+## **Automation Library - Toolkit Script (optional)**
+
+Separate from the lifecycle (install/uninstall/reinstall) management script, a *toolkit* script is useful for the ancillary actions you run against an agent that is **already installed** - restarting the service, tweaking a setting, gathering diagnostic logs, etc. Keeping these out of the management script avoids cluttering the lifecycle logic and keeps each concern separate. Use the toolkit template in this directory as a starting point.
+
+- Create a new Script using the toolkit template in this directory.
+- Name: \<App Name> Toolkit
+- Provide a description and categories according to *\<your standards and guidelines>*
+- Include the Software category at a minimum.
+- Add a Script Variable
+    - Type: Dropdown
+    - Name: Action
+    - Option Values: one per action the toolkit supports (e.g. Restart Service, Apply Configuration, Gather Diagnostics)
+    - Consider making this Mandatory, since - unlike the management script - there is no "detected behavior" fallback; an unset action just errors out.
+- Adjust the $env:agentDisplayName, $env:agentServiceName, and $env:logDirectory values to reflect the app and your standards.
+- Add one function per action, then wire each into the switch statement at the bottom. The switch labels must EXACTLY match the Dropdown option values.
+- Remove any example actions you don't need, and add your own (registry/config tweaks, cache clears, re-registration, targeted service control, etc.).
+- Retrieve any required fields (tokens, IDs, region, etc.) at the top of the script using Get-NinjaProperty calls, just as with the management script.
+
 ## **Custom Fields**
 
 - Deployment Behavior
@@ -50,9 +68,12 @@ A single Automation/Script is used to Install, Uninstall, Reinstall (when brok
     - For sensitive/privileged tokens or extremely long ones, use a Secure field. Secure fields not only mask the data and log access, but the masking reduces visual clutter on Custom Field screens. If the string is simple and not sensitive, use the Text field type.
     - Ensure they use a similar naming convention (e.g. \<AppName> Token, \<AppName> Key)
     - Scope them appropriately on the Inheritance screen, it is unlikely a company-wide install key will need to be overridden at the location or device level.
+    - For truly global values that apply to every org - such as a single deployment token or account ID shared across all clients - use a **System** level field. System is an inheritance level above Org, so the value is set once and applies everywhere without needing per-org overrides. Only enable lower inheritance levels (Org, Location, Device) if you actually expect to override the value somewhere; otherwise leave it at System to reduce clutter and prevent accidental per-org changes.
+    - Set permissions appropriately for these global fields. Because a System-level token or account ID is shared across all clients, restrict Technician access so co-managed client roles and Tier 1 helpdesk get **Read** or **No Access** (never Editable). This prevents a client-facing or lower-tier technician from viewing/changing a value that affects your entire fleet. Reserve Edit access for the roles that manage the framework itself.
 - Other Fields as Needed
     - Use a similar naming convention (e.g. \<AppName> Install Type, \<AppName> Org ID, \<Appname> Region)
-    - Scope them appropriately on the inheritance screen.
+    - Scope them appropriately on the inheritance screen. As with tokens, prefer a **System** level field for any value that is truly global across all orgs, and only add Org/Location/Device inheritance when per-org overrides are actually needed.
+    - Note: the Deployment Behavior field is an exception - it is intended to be overridden per Org/Location/Device, so it should not be scoped to System only.
 
 ## **Policies**
 
