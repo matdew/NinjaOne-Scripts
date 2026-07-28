@@ -63,7 +63,7 @@ Separate from the lifecycle (install/uninstall/reinstall) management script, a *
         - API: READ (READ/WRITE in some cases)
         - Technician access: EDITABLE
     - Details: Please include any scripts/APIs that refer to this field (see *your standards and guidelines>*) in the Description. Tooltip should explain that this field changes application deployment behavior.
-    - Advanced settings: Create 3 options, "Install", "No Action" (Mark as Default), "Uninstall"
+    - Advanced settings: Create 3 options, "Install", "No Action" (Do NOT mark as Default), "Uninstall"
 - Installation Tokens/Keys
     - For sensitive/privileged tokens or extremely long ones, use a Secure field. Secure fields not only mask the data and log access, but the masking reduces visual clutter on Custom Field screens. If the string is simple and not sensitive, use the Text field type.
     - Ensure they use a similar naming convention (e.g. \<AppName> Token, \<AppName> Key)
