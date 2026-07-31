@@ -1,6 +1,6 @@
 ---
 name: ninjaone-api
-description: Use when code uses Invoke-RestMethod with NinjaOne API URLs, references ninjarmm.com/api/v2, implements OAuth2 for NinjaOne, or user asks about NinjaOne REST API, device filters, pagination, or bulk API operations.
+description: Using the NinjaOne REST API v2 for automation, integration, and data retrieval via HTTP requests. Use when scripts need to interact with NinjaOne programmatically, manage devices/organizations/tickets, perform bulk operations, create tag definitions, retrieve monitoring data, synchronize with external systems (PSA, ITSM), or build custom dashboards. Covers OAuth2 authentication, pagination, filtering (device filters like df, class, org, status), rate limiting, and error handling patterns.
 ---
 
 # NinjaOne REST API v2
@@ -24,14 +24,26 @@ The NinjaOne Public API v2 provides programmatic access to manage devices, organ
 ## Prerequisites
 
 1. **API Credentials:**
-   - Client ID and Client Secret (OAuth2)
-   - Obtained from NinjaOne Administration > Apps > API
+   - Client ID (and Client Secret for machine-to-machine apps) - OAuth2
+   - Obtained from NinjaOne Administration > Apps > API Clients
    - Scopes: `monitoring`, `management`, `control`
 
 2. **Required Tools:**
    - HTTP client library (e.g., `Invoke-RestMethod`, `curl`, `requests`)
    - JSON parsing capabilities
    - Secure credential storage mechanism
+
+3. **Choose the correct Client App type for your use case:**
+
+   | App type | Grant flow | Has secret? | Use for |
+   |----------|-----------|-------------|---------|
+   | **API Services (machine-to-machine)** | `client_credentials` | Yes | Unattended scripts, scheduled scripts, RMM/NinjaOne script custom fields |
+   | **Native (iOS, Android, macOS, Windows, etc.)** | `authorization_code` + PKCE | No | Interactive CLI/desktop tools using a loopback redirect (`http://localhost:PORT/`) |
+   | **Web (PHP, Java, .NET Core, etc.)** | `authorization_code` | Yes (confidential) | Server-side web apps with a hosted https redirect |
+   | **Single Page (Angular, React, Vue, etc.)** | `authorization_code` + PKCE | No | Browser-hosted SPAs with an https-hosted redirect page |
+
+   Using the wrong app type for the flow you're implementing is the most common cause of
+   OAuth failures - see Troubleshooting below.
 
 ## Authentication
 
@@ -64,6 +76,110 @@ $headers = @{
 - Implement token refresh logic for long-running operations
 - Use environment variables or secure vaults for credentials
 
+### OAuth2 Authorization Code + PKCE (Interactive User Sign-In)
+
+Use this flow for scripts/tools that need to act **as a signed-in user** (rather than
+a service account), or when the target app must be a public client with no secret
+(desktop/CLI tools, native apps). This is a different Client App registration than the
+`client_credentials` (API Services) flow above - see the app-type table in Prerequisites.
+
+**Prerequisites specific to this flow:**
+
+- Client App registered in NinjaOne as **Native (iOS, Android, macOS, Windows, etc.)**.
+  Using **API Services (machine-to-machine)** here will not work - hitting the authorize
+  endpoint with a machine-to-machine `client_id` returns a generic 404, not a helpful
+  OAuth error (see Troubleshooting).
+- A loopback redirect URI registered on the app, e.g. `http://localhost:8888/`.
+  **It must match character-for-character** (including presence/absence of a trailing
+  slash) what your script sends as `redirect_uri` - NinjaOne does exact string matching,
+  not path-normalized matching.
+- Scopes granted on the app must be a superset of what you request (e.g. `monitoring`,
+  `management`, optionally `offline_access` if you also want a refresh token).
+
+**Flow:**
+
+1. Generate a PKCE `code_verifier` / `code_challenge` (S256) and a random `state`.
+2. Start a local `HttpListener` on the redirect URI's host:port to catch the callback.
+3. Open the system browser to `/ws/oauth/authorize` with `response_type=code`.
+4. User signs in/consents in the browser; NinjaOne redirects to your loopback URI with
+   `?code=...&state=...`.
+5. Exchange the `code` (+ `code_verifier`) for tokens at `/ws/oauth/token`.
+
+```powershell
+function New-PkceVerifier {
+    $bytes = New-Object byte[] 64
+    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    ([Convert]::ToBase64String($bytes).TrimEnd('=') -replace '\+','-' -replace '/','_')
+}
+
+function Get-PkceChallenge {
+    param([string]$Verifier)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $hash = $sha.ComputeHash([Text.Encoding]::ASCII.GetBytes($Verifier))
+    ([Convert]::ToBase64String($hash).TrimEnd('=') -replace '\+','-' -replace '/','_')
+}
+
+$baseUrl     = 'https://app.ninjarmm.com'
+$clientId    = '<native-app-client-id>'
+$redirectUri = 'http://localhost:8888/'   # must exactly match the app's registered redirect URI
+$scope       = 'monitoring management'
+
+$verifier  = New-PkceVerifier
+$challenge = Get-PkceChallenge -Verifier $verifier
+$state     = [Guid]::NewGuid().ToString('N')
+
+$listener = [System.Net.HttpListener]::new()
+$redirect = [Uri]$redirectUri
+$listener.Prefixes.Add("$($redirect.Scheme)://$($redirect.Host):$($redirect.Port)/")
+$listener.Start()
+
+$authorizeUri = '{0}/ws/oauth/authorize?response_type=code&client_id={1}&redirect_uri={2}&scope={3}&state={4}&code_challenge={5}&code_challenge_method=S256' -f `
+    $baseUrl, [Uri]::EscapeDataString($clientId), [Uri]::EscapeDataString($redirectUri),
+    [Uri]::EscapeDataString($scope), [Uri]::EscapeDataString($state), [Uri]::EscapeDataString($challenge)
+Start-Process $authorizeUri
+
+$context = $listener.GetContext()
+$code = $context.Request.QueryString['code']
+$returnedState = $context.Request.QueryString['state']
+# ... write a simple HTML response, close $context.Response, verify $returnedState -eq $state ...
+$listener.Stop(); $listener.Close()
+
+$tokenResponse = Invoke-RestMethod -Method Post -Uri "$baseUrl/ws/oauth/token" `
+    -Headers @{ accept = 'application/json'; 'Content-Type' = 'application/x-www-form-urlencoded' } `
+    -Body @{
+        grant_type    = 'authorization_code'
+        client_id     = $clientId
+        redirect_uri  = $redirectUri
+        code          = $code
+        code_verifier = $verifier
+        scope         = $scope
+    }
+$accessToken = $tokenResponse.access_token
+```
+
+Reference implementation with full error handling, PKCE, and a reusable `-OAuthPathPrefix`
+fallback: [Get-NinjaInteractiveOAuthToken.ps1](../../../../NinjaOne/API/Get-NinjaInteractiveOAuthToken.ps1).
+
+**Known gotchas (confirmed against a live tenant, 2026-07-31):**
+
+- **Wrong app type ⇒ misleading 404, not an OAuth error.** If `client_id` belongs to an
+  **API Services (machine-to-machine)** app, calling `/ws/oauth/authorize` returns:
+  ```json
+  { "resultCode": "FAILURE", "errorMessage": "HTTP 404 Not Found", "incidentId": "WEB_MGMT_SERVICE-..." }
+  ```
+  This looks like a routing/redirect problem but actually means the app doesn't support
+  the interactive flow at all. Fix: create/use a **Native** type Client App.
+- **Redirect URI trailing-slash mismatch ⇒ also renders as the same 404.** After signing
+  in, NinjaOne internally redirects to `/ws/oauth/error?error=unauthorized_client&error_description=Invalid+redirect_uri`
+  - but that error page itself 404s with the same `WEB_MGMT_SERVICE` JSON body (a bug in
+  NinjaOne's own error page, not your script). **Check the URL's query string**, not just
+  the JSON body, to see the real `error`/`error_description`. Fix: make the `redirect_uri`
+  your script sends match the registered value character-for-character (don't force-add
+  or strip a trailing slash - preserve exactly what's registered).
+- **Some tenants must use `/oauth/authorize` and `/oauth/token`** (no `ws` prefix) instead
+  of `/ws/oauth/authorize` / `/ws/oauth/token`. If authorize 404s even with a correct
+  Native app + exact redirect_uri match, try the non-`ws` path as a fallback.
+
 ## Common API Patterns
 
 ### Pagination
@@ -81,10 +197,10 @@ do {
     if ($cursor) {
         $url += "&after=$cursor"
     }
-
+    
     $response = Invoke-RestMethod -Uri $url -Headers $headers
     $allDevices += $response
-
+    
     # Extract cursor from next page link
     if ($response.PSObject.Properties['next']) {
         $cursor = [System.Web.HttpUtility]::ParseQueryString(
@@ -197,7 +313,7 @@ try {
 } catch {
     $statusCode = $_.Exception.Response.StatusCode.value__
     $errorBody = $_.ErrorDetails.Message | ConvertFrom-Json
-
+    
     switch ($statusCode) {
         400 { Write-Error "Bad Request: $($errorBody.message)" }
         401 { Write-Error "Unauthorized: Token may be expired" }
@@ -268,12 +384,12 @@ Invoke-RestMethod -Uri "$baseUrl/devices/approval/APPROVE" -Headers $headers -Me
 $fields = Invoke-RestMethod -Uri "$baseUrl/device/$deviceId/custom-fields" -Headers $headers
 
 # Update custom field value
-$update = @(
+$update = @{
     @{
-        name  = "FieldName"
+        name = "FieldName"
         value = "New Value"
     }
-)
+}
 Invoke-RestMethod -Uri "$baseUrl/device/$deviceId/custom-fields" -Headers $headers -Method Patch -Body ($update | ConvertTo-Json) -ContentType "application/json"
 
 # Get organization custom fields
@@ -363,7 +479,7 @@ function Invoke-NinjaApiWithRetry {
         [object]$Body,
         [int]$MaxRetries = 3
     )
-
+    
     $attempt = 0
     do {
         try {
@@ -376,12 +492,12 @@ function Invoke-NinjaApiWithRetry {
                 $params.Body = ($Body | ConvertTo-Json -Depth 10)
                 $params.ContentType = "application/json"
             }
-
+            
             return Invoke-RestMethod @params
         } catch {
             $attempt++
             $statusCode = $_.Exception.Response.StatusCode.value__
-
+            
             if ($statusCode -eq 429 -and $attempt -lt $MaxRetries) {
                 $retryAfter = $_.Exception.Response.Headers['Retry-After']
                 if ($retryAfter) {
@@ -417,11 +533,11 @@ $secret = Get-Secret -Name "NinjaClientSecret" -Vault "MyVault"
 # Validate response structure
 function Assert-NinjaApiResponse {
     param($Response, [string]$ExpectedProperty)
-
+    
     if (-not $Response) {
         throw "Empty response from API"
     }
-
+    
     if ($ExpectedProperty -and -not $Response.PSObject.Properties[$ExpectedProperty]) {
         throw "Expected property '$ExpectedProperty' not found in response"
     }
@@ -446,14 +562,14 @@ foreach ($device in $devices) {
             value = (Get-Date).ToString("yyyy-MM-dd")
         }
     )
-
+    
     try {
         Invoke-RestMethod -Uri "$baseUrl/device/$($device.id)/custom-fields" `
             -Headers $headers `
             -Method Patch `
             -Body ($update | ConvertTo-Json) `
             -ContentType "application/json"
-
+        
         Write-Verbose "Updated device: $($device.displayName)"
     } catch {
         Write-Warning "Failed to update device $($device.id): $_"
@@ -487,7 +603,7 @@ $alerts = Invoke-RestMethod -Uri "$baseUrl/alerts?severity=CRITICAL" -Headers $h
 foreach ($alert in $alerts) {
     # Check if ticket already exists for this alert
     $existingTicket = $alert.psaTicketId
-
+    
     if (-not $existingTicket) {
         $ticket = @{
             clientId = $alert.device.organizationId
@@ -502,7 +618,7 @@ foreach ($alert in $alerts) {
             severity = "CRITICAL"
             nodeId = $alert.deviceId
         }
-
+        
         Invoke-RestMethod -Uri "$baseUrl/ticketing/ticket" `
             -Headers $headers `
             -Method Post `
@@ -523,18 +639,14 @@ foreach ($alert in $alerts) {
 | 500 Server Error | Check API status page, retry with exponential backoff |
 | Empty Response | Verify filters and pagination parameters |
 | Parsing Error | Ensure `-ContentType "application/json"` is set for POST/PATCH/PUT |
-
-## Common Mistakes
-
-1. **Missing `ContentType` on POST/PATCH/PUT** - `Invoke-RestMethod` defaults to form-encoded bodies. Always include `-ContentType "application/json"` when sending JSON. Without it, the API returns 400 or silently ignores the body.
-2. **Wrong body format for custom fields** - The custom fields PATCH endpoint expects an **array** of objects, not a bare hashtable. Use `@( @{ name = "..."; value = "..." } )` not `@{ @{ ... } }`. A hashtable cannot contain an unlabelled hashtable — `ConvertTo-Json` on the latter produces invalid JSON.
-3. **Forgetting `-Depth` on `ConvertTo-Json`** - The default depth is 2. Nested objects (e.g., ticket `description` with `htmlBody`) are silently truncated to `"System.Collections.Hashtable"`. Use `-Depth 10` for complex bodies.
-4. **Using string IDs where integers are required** - Filter values like `org=`, `location=`, and `role=` expect integers. Passing a string-typed variable (e.g., `"$orgId"`) may work in some contexts but fail in others — cast explicitly: `[int]$orgId`.
-5. **Ignoring cursor-based pagination** - Endpoints like `/devices` return up to 100 results by default. Without pagination logic, bulk operations silently miss devices. Always implement the `after` cursor loop for any endpoint that returns lists.
+| `/ws/oauth/authorize` returns `WEB_MGMT_SERVICE` 404 JSON | `client_id` is likely a Client Credentials (machine-to-machine) app; use a **Native** app for the interactive PKCE flow instead |
+| Same `WEB_MGMT_SERVICE` 404 JSON after browser redirects to `/ws/oauth/error?error=unauthorized_client&error_description=Invalid+redirect_uri` | The `redirect_uri` your script sent doesn't character-for-character match the app's registered redirect URI (trailing slash is a common culprit) - fix the mismatch, don't force-normalize it |
+| Authorize still 404s with correct app type + exact redirect_uri | Try dropping the `ws` prefix: use `/oauth/authorize` and `/oauth/token` instead of `/ws/oauth/authorize` / `/ws/oauth/token` |
 
 ## References
 
 - [NinjaOne API Documentation](https://app.ninjarmm.com/apidocs-v2/core-resources)
+- [OpenAPI Specification](./references/api-specification.md)
 - [Device Filter Reference](./references/device-filters.md)
 - [Advanced Examples](./references/api-examples.md)
 - Related Skills:
