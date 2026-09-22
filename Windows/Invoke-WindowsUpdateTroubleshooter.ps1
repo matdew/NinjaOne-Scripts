@@ -683,8 +683,8 @@ function Test-SystemPartitionSpace {
     if (Get-Command Get-Partition -ErrorAction SilentlyContinue) {
         try {
             $part = Get-Partition -ErrorAction Stop |
-            Where-Object { $_.IsSystem -or $_.GptType -eq '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}' } |
-            Select-Object -First 1
+                Where-Object { $_.IsSystem -or $_.GptType -eq '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}' } |
+                Select-Object -First 1
             if ($part) {
                 $systemVolume = Get-Volume -Partition $part -ErrorAction SilentlyContinue
             }
@@ -695,8 +695,8 @@ function Test-SystemPartitionSpace {
         try {
             # BootVolume=TRUE with no drive letter is the usual shape of the hidden system partition.
             $systemVolume = Get-CimInstance Win32_Volume -ErrorAction Stop |
-            Where-Object { $_.BootVolume -eq $true -and [string]::IsNullOrWhiteSpace($_.DriveLetter) } |
-            Select-Object -First 1
+                Where-Object { $_.BootVolume -eq $true -and [string]::IsNullOrWhiteSpace($_.DriveLetter) } |
+                Select-Object -First 1
         } catch { Write-Verbose ('Ignored: ' + $_.Exception.Message) }
     }
 
@@ -1231,9 +1231,9 @@ function Test-WuActivityRecency {
     # LastInstallationSuccessDate is skewed by daily Defender updates; hotfix history is the honest signal.
     try {
         $lastHotfix = Get-HotFix -ErrorAction Stop |
-        Where-Object { $_.InstalledOn } |
-        Sort-Object InstalledOn -Descending |
-        Select-Object -First 1
+            Where-Object { $_.InstalledOn } |
+            Sort-Object InstalledOn -Descending |
+            Select-Object -First 1
 
         if ($lastHotfix) {
             $age = [int]((Get-Date) - $lastHotfix.InstalledOn).TotalDays
@@ -1273,6 +1273,18 @@ $script:OsServicingTable = @{
     26200 = @{ Name = 'Windows 11 25H2'; Broad = '2027-10-12'; Enterprise = '2028-10-10' }
 }
 
+# LTSB/LTSC end-of-servicing by build. These editions share a build number with the equivalent GA
+# release above but have far longer lifecycles, so they are keyed separately and resolved by edition
+# first. NonIoT = Enterprise/Education LTSC; IoT = IoT Enterprise LTSC (10-year lifecycle).
+# REVIEW PERIODICALLY - snapshot compiled 2026-09. https://learn.microsoft.com/windows/release-health/supported-versions-windows-client
+$script:LtscServicingTable = @{
+    10240 = @{ Name = 'Windows 10 Enterprise 2015 LTSB'; NonIoT = '2025-10-14'; IoT = '2025-10-14' }
+    14393 = @{ Name = 'Windows 10 Enterprise 2016 LTSB'; NonIoT = '2026-10-13'; IoT = '2026-10-13' }
+    17763 = @{ Name = 'Windows 10 Enterprise LTSC 2019'; NonIoT = '2029-01-09'; IoT = '2029-01-09' }
+    19044 = @{ Name = 'Windows 10 Enterprise LTSC 2021'; NonIoT = '2027-01-12'; IoT = '2032-01-13' }
+    26100 = @{ Name = 'Windows 11 Enterprise LTSC 2024'; NonIoT = '2029-10-09'; IoT = '2034-10-10' }
+}
+
 function Test-OsServicingStatus {
     # A client past end-of-servicing receives nothing while every other check looks clean.
     Write-Section -Title 'OS Servicing Status'
@@ -1293,14 +1305,6 @@ function Test-OsServicingStatus {
 
     $build = 0
     [void][int]::TryParse(([string]$os.BuildNumber), [ref]$build)
-    $entry = $script:OsServicingTable[$build]
-
-    if (-not $entry) {
-        Write-Report "Build $build is not in the servicing table (newer than this script, or an unsupported build)."
-        Add-Finding -Category 'Servicing' -Severity 'Info' `
-            -Detail "OS build $build was not found in the script's end-of-servicing table; it may be newer than the table (compiled 2026-09)."
-        return
-    }
 
     # Use EditionID, not Caption (Caption can say "Business" on Pro and misclassify the servicing lane).
     $editionId = ''
@@ -1308,16 +1312,52 @@ function Test-OsServicingStatus {
         $editionId = [string](Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name EditionID -ErrorAction Stop).EditionID
     } catch { Write-Verbose ('Ignored: ' + $_.Exception.Message) }
 
+    # LTSB/LTSC editions carry an 'S' suffix (EnterpriseS, EnterpriseSN, IoTEnterpriseS) and have their
+    # own, much longer lifecycles that share a build number with the GA release, so resolve them first.
     if ($editionId) {
-        $isEnterprise = ($editionId -match 'Enterprise|Education')
+        $isLtsc = ($editionId -match 'EnterpriseS')
     } else {
-        $isEnterprise = ([string]$os.Caption -match 'Enterprise|Education')
+        $isLtsc = ([string]$os.Caption -match 'LTSC|LTSB')
     }
-    $eosRaw = if ($isEnterprise) { $entry.Enterprise } else { $entry.Broad }
-    $eos = [datetime]$eosRaw
-    $edition = if ($isEnterprise) { 'Enterprise/Education' } else { 'Home/Pro' }
 
-    Write-Report "Release       : $($entry.Name) (build $build)"
+    if ($isLtsc) {
+        $ltsc = $script:LtscServicingTable[$build]
+        if (-not $ltsc) {
+            Write-Report "LTSC/LTSB build $build is not in the servicing table (newer than this script, or an unsupported build)."
+            Add-Finding -Category 'Servicing' -Severity 'Info' `
+                -Detail "LTSC/LTSB OS build $build was not found in the script's end-of-servicing table; it may be newer than the table (compiled 2026-09)."
+            return
+        }
+
+        # IoT Enterprise LTSC (EditionID IoTEnterpriseS) has a 10-year lifecycle; standard Enterprise LTSC is 5.
+        if ($editionId) {
+            $isIot = ($editionId -match 'IoTEnterpriseS')
+        } else {
+            $isIot = ([string]$os.Caption -match 'IoT')
+        }
+        $releaseName = $ltsc.Name
+        $edition = if ($isIot) { 'IoT Enterprise LTSC' } else { 'Enterprise LTSC/LTSB' }
+        $eos = if ($isIot) { [datetime]$ltsc.IoT } else { [datetime]$ltsc.NonIoT }
+    } else {
+        $entry = $script:OsServicingTable[$build]
+        if (-not $entry) {
+            Write-Report "Build $build is not in the servicing table (newer than this script, or an unsupported build)."
+            Add-Finding -Category 'Servicing' -Severity 'Info' `
+                -Detail "OS build $build was not found in the script's end-of-servicing table; it may be newer than the table (compiled 2026-09)."
+            return
+        }
+
+        if ($editionId) {
+            $isEnterprise = ($editionId -match 'Enterprise|Education')
+        } else {
+            $isEnterprise = ([string]$os.Caption -match 'Enterprise|Education')
+        }
+        $releaseName = $entry.Name
+        $edition = if ($isEnterprise) { 'Enterprise/Education' } else { 'Home/Pro' }
+        $eos = if ($isEnterprise) { [datetime]$entry.Enterprise } else { [datetime]$entry.Broad }
+    }
+
+    Write-Report "Release       : $releaseName (build $build)"
     Write-Report "Servicing lane: $edition"
     Write-Report "End of service: $($eos.ToString('yyyy-MM-dd'))"
 
@@ -1325,15 +1365,15 @@ function Test-OsServicingStatus {
 
     if ($daysLeft -lt 0) {
         Add-Finding -Category 'Servicing' -Severity 'Critical' `
-            -Detail "$($entry.Name) ($edition) reached end of servicing on $($eos.ToString('yyyy-MM-dd')), $([math]::Abs($daysLeft)) days ago. This device no longer receives quality updates, which explains an absence of updates even when everything else is healthy." `
+            -Detail "$releaseName ($edition) reached end of servicing on $($eos.ToString('yyyy-MM-dd')), $([math]::Abs($daysLeft)) days ago. This device no longer receives quality updates, which explains an absence of updates even when everything else is healthy." `
             -Recommendation 'Upgrade to a serviced Windows release (feature update or in-place upgrade).'
     } elseif ($daysLeft -le 90) {
         Add-Finding -Category 'Servicing' -Severity 'Warning' `
-            -Detail "$($entry.Name) ($edition) reaches end of servicing on $($eos.ToString('yyyy-MM-dd')), in $daysLeft days." `
+            -Detail "$releaseName ($edition) reaches end of servicing on $($eos.ToString('yyyy-MM-dd')), in $daysLeft days." `
             -Recommendation 'Plan the feature update before servicing ends.'
     } else {
         Add-Finding -Category 'Servicing' -Severity 'OK' `
-            -Detail "$($entry.Name) ($edition) is in servicing until $($eos.ToString('yyyy-MM-dd')) ($daysLeft days remaining)."
+            -Detail "$releaseName ($edition) is in servicing until $($eos.ToString('yyyy-MM-dd')) ($daysLeft days remaining)."
     }
 }
 
@@ -1640,7 +1680,7 @@ function Invoke-SetupDiag {
     $autoRegPath = 'HKLM:\SYSTEM\Setup\SetupDiag\Results'
     if (Test-Path -LiteralPath $autoRegPath) {
         $regProps = Get-ItemProperty -Path $autoRegPath -ErrorAction SilentlyContinue |
-        Select-Object * -ExcludeProperty PS*
+            Select-Object * -ExcludeProperty PS*
         if ($regProps -and @($regProps.PSObject.Properties).Count -gt 0) {
             Write-Report "SetupDiag auto-run registry marker found at $autoRegPath :"
             $regProps.PSObject.Properties | ForEach-Object { Write-Report ('  {0} = {1}' -f $_.Name, $_.Value) }
@@ -1774,7 +1814,7 @@ function Invoke-SetupDiag {
         $message = ''
         try {
             $lines = @(Get-Content -LiteralPath $stdOutFile -ErrorAction SilentlyContinue |
-                Where-Object { $_ -match '\S' -and $_ -notmatch 'Copyright|^SetupDiag v' })
+                    Where-Object { $_ -match '\S' -and $_ -notmatch 'Copyright|^SetupDiag v' })
             if ($lines.Count -gt 0) { $message = $lines[-1].Trim() }
         } catch { Write-Verbose ('Ignored: ' + $_.Exception.Message) }
 
