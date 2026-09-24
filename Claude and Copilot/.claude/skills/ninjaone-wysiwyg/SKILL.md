@@ -201,7 +201,7 @@ $success = @"
 "@
 
 # Error
-$error = @"
+$errorCard = @"
 <div class="info-card error">
   <i class="info-icon fa-solid fa-circle-exclamation"></i>
   <div class="info-text">
@@ -317,7 +317,7 @@ $columnChart = @"
     <tr><td style="--size: 0.75"><span class="data">75%</span></td></tr>
   </tbody>
 </table>
-"@"
+"@
 ```
 
 ### Bar Chart
@@ -330,7 +330,7 @@ $barChart = @"
     <tr><td style="--size: 0.6"><span class="data">60%</span></td></tr>
   </tbody>
 </table>
-"@"
+"@
 ```
 
 ### Pie Chart
@@ -345,7 +345,7 @@ $pieChart = @"
     </tbody>
   </table>
 </div>
-"@"
+"@
 ```
 
 ### Line Chart
@@ -395,7 +395,7 @@ $areaChart = @"
     </tr>
   </tbody>
 </table>
-"@"
+"@
 ```
 
 ### Chart Modifiers
@@ -434,24 +434,20 @@ Bootstrap's grid system is available for complex responsive layouts when needed.
 ```powershell
 # Three equal columns
 $html = @"
-<div class="container">
-  <div class="row">
-    <div class="col">Column 1</div>
-    <div class="col">Column 2</div>
-    <div class="col">Column 3</div>
-  </div>
+<div class="row">
+  <div class="col">Column 1</div>
+  <div class="col">Column 2</div>
+  <div class="col">Column 3</div>
 </div>
-"@"
+"@
 
 # Responsive: stacked mobile, horizontal tablet+
 $html = @"
-<div class="container">
-  <div class="row">
-    <div class="col-sm-8">Main content</div>
-    <div class="col-sm-4">Sidebar</div>
-  </div>
+<div class="row">
+  <div class="col-sm-8">Main content</div>
+  <div class="col-sm-4">Sidebar</div>
 </div>
-"@"
+"@
 
 # Mixed breakpoints
 $html = @"
@@ -459,7 +455,7 @@ $html = @"
   <div class="col-6 col-md-4">Responsive column</div>
   <div class="col-6 col-md-8">Another column</div>
 </div>
-"@"
+"@
 ```
 
 ### Row Columns
@@ -469,15 +465,13 @@ Control the number of columns directly on the row:
 ```powershell
 # Two columns per row
 $html = @"
-<div class="container">
-  <div class="row row-cols-2">
-    <div class="col">Column</div>
-    <div class="col">Column</div>
-    <div class="col">Column</div>
-    <div class="col">Column</div>
-  </div>
+<div class="row row-cols-2">
+  <div class="col">Column</div>
+  <div class="col">Column</div>
+  <div class="col">Column</div>
+  <div class="col">Column</div>
 </div>
-"@"
+"@
 
 # Responsive columns: 1 on mobile, 2 on small, 4 on medium+
 $html = @"
@@ -487,7 +481,7 @@ $html = @"
   <div class="col">Column</div>
   <div class="col">Column</div>
 </div>
-"@"
+"@
 
 # Auto-width columns
 $html = @"
@@ -496,40 +490,38 @@ $html = @"
   <div class="col">Column</div>
   <div class="col">Column</div>
 </div>
-"@"
+"@
 ```
 
 ### Nesting
 
 ```powershell
 $html = @"
-<div class="container">
-  <div class="row">
-    <div class="col-sm-9">
-      <div class="row">
-        <div class="col-8 col-sm-6">Nested Level 2</div>
-        <div class="col-4 col-sm-6">Nested Level 2</div>
-      </div>
+<div class="row">
+  <div class="col-sm-9">
+    <div class="row">
+      <div class="col-8 col-sm-6">Nested Level 2</div>
+      <div class="col-4 col-sm-6">Nested Level 2</div>
     </div>
   </div>
 </div>
-"@"
+"@
 ```
 
 ### Gutters
 
 ```powershell
 # No gutters
-$html = @"<div class="row g-0"><div class="col">No spacing</div></div>"@"
+$html = '<div class="row g-0"><div class="col">No spacing</div></div>'
 
 # Custom gutters
-$html = @"<div class="row g-3"><div class="col">3 spacing</div></div>"@"
+$html = '<div class="row g-3"><div class="col">3 spacing</div></div>'
 
 # Horizontal only
-$html = @"<div class="row gx-5"><div class="col">Horizontal spacing</div></div>"@"
+$html = '<div class="row gx-5"><div class="col">Horizontal spacing</div></div>'
 
 # Vertical only
-$html = @"<div class="row gy-3"><div class="col">Vertical spacing</div></div>"@"
+$html = '<div class="row gy-3"><div class="col">Vertical spacing</div></div>'
 ```
 
 ### Additional Grid Utilities
@@ -557,7 +549,7 @@ $html = @"
 <div class="card">
   <div class="card-body">Large content here...</div>
 </div>
-"@"
+"@
 
 # Pipe to NinjaOne field
 $html | Ninja-Property-Set-Piped "FieldName"

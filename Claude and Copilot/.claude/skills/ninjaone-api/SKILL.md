@@ -1,15 +1,20 @@
 ---
 name: ninjaone-api
-description: Using the NinjaOne REST API v2 for automation, integration, and data retrieval via HTTP requests. Use when scripts need to interact with NinjaOne programmatically, manage devices/organizations/tickets, perform bulk operations, create tag definitions, retrieve monitoring data, synchronize with external systems (PSA, ITSM), or build custom dashboards. Covers OAuth2 authentication, pagination, filtering (device filters like df, class, org, status), rate limiting, and error handling patterns.
+description: Using the NinjaOne REST API v2 for automation, integration, and data retrieval via HTTP requests. Use when scripts need to interact with NinjaOne programmatically, manage devices/organizations/tickets, perform bulk operations, manage ITAM asset tags, retrieve monitoring data, synchronize with external systems (PSA, ITSM), or build custom dashboards. Covers OAuth2 authentication, pagination, filtering (device filters like df, class, org, status), rate limiting, and error handling patterns.
 ---
 
 # NinjaOne REST API v2
 
-The NinjaOne Public API v2 provides programmatic access to manage devices, organizations, tickets, custom fields, tags, and monitoring data via HTTP requests.
+The NinjaOne Public API v2 provides programmatic access to manage devices, organizations, tickets, custom fields, ITAM asset tags, and monitoring data via HTTP requests.
 
 **Base URL:** `https://{instance}.ninjarmm.com/api/v2`
 
 **API Documentation:** `https://{instance}.ninjarmm.com/apidocs-v2`
+
+**Regional instances:** `{instance}` is the same subdomain you sign in to. Valid values are
+`app` (US), `us2` (US2), `eu` (EU), `ca` (Canada), `oc` (Oceania) and `jp` (Japan) - e.g.
+`https://eu.ninjarmm.com/api/v2`. The API base URL, token URL and apidocs all live on that
+same host, so use whichever one your organization signs in to.
 
 ## When to Use This Skill
 
@@ -157,8 +162,11 @@ $tokenResponse = Invoke-RestMethod -Method Post -Uri "$baseUrl/ws/oauth/token" `
 $accessToken = $tokenResponse.access_token
 ```
 
-Reference implementation with full error handling, PKCE, and a reusable `-OAuthPathPrefix`
-fallback: [Get-NinjaInteractiveOAuthToken.ps1](../../../../NinjaOne/API/Get-NinjaInteractiveOAuthToken.ps1).
+The snippet above is intentionally minimal (happy path). For production use also add: a
+`state` check before exchanging the code, a timeout/cancellation on
+`$listener.GetContext()`, an HTML page written back to the browser tab, and the non-`ws`
+`/oauth/*` path fallback described below. See the NinjaOne authorization docs (Authorization
+Code Flow with PKCE) for the full protocol.
 
 **Known gotchas (confirmed against a live tenant, 2026-07-31):**
 
@@ -184,85 +192,83 @@ fallback: [Get-NinjaInteractiveOAuthToken.ps1](../../../../NinjaOne/API/Get-Ninj
 
 ### Pagination
 
-Most list endpoints support cursor-based pagination:
+Device list endpoints (`/devices`, `/devices-detailed`) return a plain JSON array with no
+`next` property. Page by passing the **last device id** from the previous page as the
+`after` cursor, and stop when a page returns fewer than `pageSize` items:
 
 ```powershell
 # Get all devices with pagination
-$baseUrl = "https://{instance}.ninjarmm.com/api/v2"
-$allDevices = @()
-$cursor = $null
+$baseUrl  = "https://{instance}.ninjarmm.com/api/v2"
+$pageSize = 100
+$allDevices = [System.Collections.Generic.List[object]]::new()
+$after = 0
 
 do {
-    $url = "$baseUrl/devices?pageSize=100"
-    if ($cursor) {
-        $url += "&after=$cursor"
+    $url  = "$baseUrl/devices?pageSize=$pageSize&after=$after"
+    $page = @(Invoke-RestMethod -Uri $url -Headers $headers)
+    if ($page.Count -gt 0) {
+        $allDevices.AddRange($page)
+        $after = $page[-1].id   # last node id = cursor for the next page
     }
-    
-    $response = Invoke-RestMethod -Uri $url -Headers $headers
-    $allDevices += $response
-    
-    # Extract cursor from next page link
-    if ($response.PSObject.Properties['next']) {
-        $cursor = [System.Web.HttpUtility]::ParseQueryString(
-            ([uri]$response.next).Query
-        )['after']
-    } else {
-        $cursor = $null
-    }
-} while ($cursor)
+} while ($page.Count -eq $pageSize)
 ```
+
+> The cursor-style `/v2/queries/*` report endpoints are different: they accept `cursor` +
+> `pageSize` and return an object shaped like `{ cursor, results }`. Page those by reading
+> `$response.cursor` until it is empty.
 
 ### Filtering
 
-Use query parameters to filter results:
+Use the `df` (device filter) query parameter to filter device lists. Combine multiple
+terms with `AND` (see Device Filters below for the full grammar):
 
 ```powershell
 # Filter devices by organization
 $devices = Invoke-RestMethod -Uri "$baseUrl/devices?df=org=$orgId" -Headers $headers
 
-# Filter by timestamp
-$devices = Invoke-RestMethod -Uri "$baseUrl/devices?df=after=$timestamp" -Headers $headers
+# Filter by creation date
+$devices = Invoke-RestMethod -Uri "$baseUrl/devices?df=created after 2024-01-01" -Headers $headers
 
-# Multiple filters
-$devices = Invoke-RestMethod -Uri "$baseUrl/devices?df=org=$orgId,class=WINDOWS_WORKSTATION" -Headers $headers
+# Multiple filters (AND logic)
+$devices = Invoke-RestMethod -Uri "$baseUrl/devices?df=org=$orgId AND class=WINDOWS_WORKSTATION" -Headers $headers
 ```
 
 ### Device Filters (df Parameter)
 
-NinjaOne API supports powerful filtering using the `df` (device filter) parameter. Filters use a comma-separated key=value syntax.
+The `df` (device filter) query parameter accepts an **expression**, not a flat
+comma-separated list. Each term is `key operator value`; combine terms with `AND`
+(aliases `and` / `&&`). The whole value must be URL-encoded. See the authoritative
+[Device Filter reference](./references/device-filters.md).
 
-### Filter Syntax
-
-```
-?df=key1=value1,key2=value2,key3=value3
-```
+**Operators:** `=`/`eq`, `!=`/`neq`/`<>`, `in (a,b,...)`, `nin`/`notin`/`!in (a,b,...)`,
+`<`/`lt`/`before`, `>`/`gt`/`after`.
 
 ### Available Filter Keys
 
-| Filter Key | Type | Description | Example Values |
-|------------|------|-------------|----------------|
-| `org` | Integer | Organization ID | `df=org=123` |
-| `class` | String | Device class | `WINDOWS_WORKSTATION`, `WINDOWS_SERVER`, `MAC`, `LINUX_SERVER`, `CLOUD_MONITOR_TARGET` |
-| `status` | String | Device status | `ONLINE`, `OFFLINE`, `PENDING`, `APPROVED` |
-| `role` | Integer | Node role ID | `df=role=5` |
-| `location` | Integer | Location ID | `df=location=10` |
-| `after` | Integer | Unix timestamp (devices modified after) | `df=after=1640000000` |
-| `before` | Integer | Unix timestamp (devices modified before) | `df=before=1640100000` |
-| `search` | String | Search in device name | `df=search=srv` |
+| Filter Key | Type | Notes / Example |
+|------------|------|-----------------|
+| `org` (alias `organization`) | Integer | `df=org=123` ; `df=organization in (1,2)` |
+| `loc` (alias `location`) | Integer | `df=loc=10` |
+| `role` | Integer | `df=role=5` |
+| `id` | Integer | `df=id in (1,2)` |
+| `class` | Enum | `df=class=WINDOWS_SERVER` ; `df=class in (WINDOWS_SERVER,MAC_SERVER)` |
+| `status` | Enum: `PENDING` \| `APPROVED` | `df=status=APPROVED` (approved is the default) |
+| `online` / `offline` | Bare keyword | `df=online` - online/offline is **not** a `status` value |
+| `created` | Date (`yyyyMMdd`, `yyyy-MM-dd`, or ISO 8601) | `df=created after 2024-01-01` |
+| `group` | Integer | `df=group 563` - members of a saved search/group |
+
+> There is **no `search` key**. To find devices by name, use the dedicated
+> `GET /v2/devices/search` ("Find devices") endpoint instead of a `df` filter.
 
 ### Device Classes
 
-| Class Value | Description |
-|-------------|-------------|
-| `WINDOWS_WORKSTATION` | Windows desktop/laptop |
-| `WINDOWS_SERVER` | Windows Server |
-| `MAC` | macOS device |
-| `LINUX_SERVER` | Linux server |
-| `LINUX_WORKSTATION` | Linux desktop |
-| `CLOUD_MONITOR_TARGET` | Cloud monitoring target |
-| `VMHOST` | Virtual machine host |
-| `NETWORK_DEVICE` | Network equipment |
-| `NAS` | Network attached storage |
+`WINDOWS_SERVER`, `WINDOWS_WORKSTATION`, `LINUX_SERVER`, `LINUX_WORKSTATION`, `MAC`,
+`MAC_SERVER`, `ANDROID`, `APPLE_IOS`, `APPLE_IPADOS`, `VMWARE_VM_HOST`, `VMWARE_VM_GUEST`,
+`HYPERV_VMM_HOST`, `HYPERV_VMM_GUEST`, `CLOUD_MONITOR_TARGET`, `NMS_SWITCH`, `NMS_ROUTER`,
+`NMS_FIREWALL`, `NMS_PRIVATE_NETWORK_GATEWAY`, `NMS_PRINTER`, `NMS_SCANNER`,
+`NMS_DIAL_MANAGER`, `NMS_WAP`, `NMS_IPSLA`, `NMS_COMPUTER`, `NMS_VM_HOST`, `NMS_APPLIANCE`,
+`NMS_OTHER`, `NMS_SERVER`, `NMS_PHONE`, `NMS_VIRTUAL_MACHINE`,
+`NMS_NETWORK_MANAGEMENT_AGENT`, `UNMANAGED_DEVICE`, `MANAGED_DEVICE`.
 
 ### Filter Examples
 
@@ -273,36 +279,31 @@ $devices = Invoke-RestMethod -Uri "$baseUrl/devices?df=org=123" -Headers $header
 # Filter by device class
 $servers = Invoke-RestMethod -Uri "$baseUrl/devices?df=class=WINDOWS_SERVER" -Headers $headers
 
-# Filter by status
-$offline = Invoke-RestMethod -Uri "$baseUrl/devices?df=status=OFFLINE" -Headers $headers
+# Offline devices (online/offline are bare keywords, not status values)
+$offline = Invoke-RestMethod -Uri "$baseUrl/devices?df=offline" -Headers $headers
 
-# Multiple filters (AND logic)
-$orgServers = Invoke-RestMethod -Uri "$baseUrl/devices?df=org=123,class=WINDOWS_SERVER,status=ONLINE" -Headers $headers
+# Multiple terms are combined with AND
+$offlineServers = Invoke-RestMethod -Uri "$baseUrl/devices?df=class=WINDOWS_SERVER AND offline" -Headers $headers
 
-# Filter by time range (devices modified in last 24 hours)
-$yesterday = [Math]::Floor((Get-Date).AddDays(-1).ToUniversalTime().Subtract([datetime]'1970-01-01').TotalSeconds)
-$recent = Invoke-RestMethod -Uri "$baseUrl/devices?df=after=$yesterday" -Headers $headers
+# Membership in a list
+$serverClasses = Invoke-RestMethod -Uri "$baseUrl/devices?df=class in (WINDOWS_SERVER,MAC_SERVER)" -Headers $headers
 
-# Search by name
-$searchResults = Invoke-RestMethod -Uri "$baseUrl/devices?df=search=prod" -Headers $headers
+# Devices created in a date range
+$created = Invoke-RestMethod -Uri "$baseUrl/devices?df=created after 2024-01-01 AND created before 2024-03-31" -Headers $headers
 
-# Complex filter: Online Windows workstations in specific org and location
-$filtered = Invoke-RestMethod -Uri "$baseUrl/devices?df=org=123,location=5,class=WINDOWS_WORKSTATION,status=ONLINE" -Headers $headers
+# Pending (awaiting approval) devices
+$pending = Invoke-RestMethod -Uri "$baseUrl/devices?df=status=PENDING" -Headers $headers
 ```
 
 ### URL Encoding Considerations
 
-When filter values contain special characters, ensure proper URL encoding:
+`df` expressions contain spaces and parentheses, so URL-encode the value:
 
 ```powershell
-# Using System.Web.HttpUtility
 Add-Type -AssemblyName System.Web
-$searchTerm = "Server-01"
-$encoded = [System.Web.HttpUtility]::UrlEncode($searchTerm)
-$url = "$baseUrl/devices?df=search=$encoded"
-
-# Or use -Uri automatic encoding with Invoke-RestMethod
-$devices = Invoke-RestMethod -Uri "$baseUrl/devices" -Headers $headers -Body @{ df = "search=Server-01" }
+$filter = 'class=WINDOWS_SERVER AND offline'
+$url = "$baseUrl/devices?df=" + [System.Web.HttpUtility]::UrlEncode($filter)
+$devices = Invoke-RestMethod -Uri $url -Headers $headers
 ```
 
 ### Error Handling
@@ -321,7 +322,7 @@ try {
         404 { Write-Error "Not Found: Resource does not exist" }
         429 { Write-Error "Rate Limited: Retry after $($_.Exception.Response.Headers['Retry-After']) seconds" }
         500 { Write-Error "Server Error: $($errorBody.message)" }
-        default { Write-Error "HTTP $statusCode: $($errorBody.message)" }
+        default { Write-Error "HTTP $($statusCode): $($errorBody.message)" }
     }
     throw
 }
@@ -383,18 +384,26 @@ Invoke-RestMethod -Uri "$baseUrl/devices/approval/APPROVE" -Headers $headers -Me
 # Get device custom fields
 $fields = Invoke-RestMethod -Uri "$baseUrl/device/$deviceId/custom-fields" -Headers $headers
 
-# Update custom field value
+# Update custom field values - body is a flat object keyed by field name
 $update = @{
-    @{
-        name = "FieldName"
-        value = "New Value"
-    }
+    FieldName  = "New Value"
+    OtherField = 42
 }
 Invoke-RestMethod -Uri "$baseUrl/device/$deviceId/custom-fields" -Headers $headers -Method Patch -Body ($update | ConvertTo-Json) -ContentType "application/json"
 
 # Get organization custom fields
 $orgFields = Invoke-RestMethod -Uri "$baseUrl/organization/$orgId/custom-fields" -Headers $headers
 ```
+
+### Tags
+
+> **Device/endpoint tags** (the tags set from the console and read in automation with
+> `Get-NinjaTag` / `Set-NinjaTag`) have **no public REST API** - they can only be read and
+> written from automation scripts running on the agent, or via `ninjarmm-cli tag-get` /
+> `tag-set` / `tag-clear`. See the [ninjaone-tags](../ninjaone-tags/SKILL.md) skill.
+>
+> The `/v2/tag` endpoints are a **separate** feature - **ITAM Asset Tags** (asset-inventory
+> labels), not endpoint tags. Don't use them to manage device tags.
 
 ### Queries (Reports)
 
@@ -418,9 +427,11 @@ $patches = Invoke-RestMethod -Uri "$baseUrl/queries/os-patches?status=PENDING" -
 # Get available scripts for device
 $options = Invoke-RestMethod -Uri "$baseUrl/device/$deviceId/scripting/options" -Headers $headers
 
-# Run script on device
+# Run script on device.
+# Library scripts use type = "SCRIPT" with the script id; type = "ACTION" is for built-in
+# actions and pairs with a uid (not id).
 $runScript = @{
-    type = "ACTION"
+    type = "SCRIPT"
     id = 123
     parameters = "param1=value1"
     runAs = "SYSTEM"
@@ -440,7 +451,7 @@ $newTicket = @{
         public = $true
         htmlBody = "<p>Ticket description</p>"
     }
-    status = "OPEN"
+    status = "1000"         # status ID (string), not a name - see note below
     priority = "MEDIUM"
     requesterUid = $userUid
 }
@@ -455,11 +466,18 @@ $update = @{
     clientId = $ticket.clientId
     ticketFormId = $ticket.ticketFormId
     subject = "Updated Subject"
-    status = "IN_PROGRESS"
+    status = "3000"         # status ID (string) - look IDs up via GET /v2/ticketing/statuses
     requesterUid = $ticket.requesterUid
 }
 Invoke-RestMethod -Uri "$baseUrl/ticketing/ticket/$ticketId" -Headers $headers -Method Put -Body ($update | ConvertTo-Json) -ContentType "application/json"
 ```
+
+> **Ticket fields:**
+> - `status` is a **status ID string** (for example the default `"1000"`), not a name like
+>   `OPEN`. List valid IDs with `GET /v2/ticketing/statuses`.
+> - `priority`: `NONE` | `LOW` | `MEDIUM` | `HIGH`.
+> - `severity`: `NONE` | `MINOR` | `MODERATE` | `MAJOR` | `CRITICAL`.
+> - Required on create: `clientId`, `ticketFormId`, `subject`, `status`.
 
 ## Best Practices
 
@@ -556,12 +574,10 @@ Assert-NinjaApiResponse -Response $device -ExpectedProperty "id"
 $devices = Invoke-RestMethod -Uri "$baseUrl/organization/$orgId/devices" -Headers $headers
 
 foreach ($device in $devices) {
-    $update = @(
-        @{
-            name = "LastAuditDate"
-            value = (Get-Date).ToString("yyyy-MM-dd")
-        }
-    )
+    # Body is a flat object keyed by field name
+    $update = @{
+        LastAuditDate = (Get-Date).ToString("yyyy-MM-dd")
+    }
     
     try {
         Invoke-RestMethod -Uri "$baseUrl/device/$($device.id)/custom-fields" `
@@ -597,8 +613,10 @@ $inventory | Export-Csv -Path "ninja_inventory.csv" -NoTypeInformation
 ### Automated Ticket Creation from Alerts
 
 ```powershell
-# Monitor for critical alerts and create tickets
-$alerts = Invoke-RestMethod -Uri "$baseUrl/alerts?severity=CRITICAL" -Headers $headers
+# Monitor for critical alerts and create tickets.
+# GET /v2/alerts only accepts sourceType, df, lang and tz - filter severity client-side.
+$alerts = Invoke-RestMethod -Uri "$baseUrl/alerts" -Headers $headers |
+    Where-Object { $_.severity -eq 'CRITICAL' }
 
 foreach ($alert in $alerts) {
     # Check if ticket already exists for this alert
@@ -613,7 +631,7 @@ foreach ($alert in $alerts) {
                 public = $true
                 htmlBody = "<p>$($alert.message)</p><p>Device: $($alert.device.displayName)</p>"
             }
-            status = "OPEN"
+            status = "1000"   # status ID string; see GET /v2/ticketing/statuses
             priority = "HIGH"
             severity = "CRITICAL"
             nodeId = $alert.deviceId
@@ -646,11 +664,12 @@ foreach ($alert in $alerts) {
 ## References
 
 - [NinjaOne API Documentation](https://app.ninjarmm.com/apidocs-v2/core-resources)
-- [OpenAPI Specification](./references/api-specification.md)
+- OpenAPI Specification: live per-instance at `https://{instance}.ninjarmm.com/apidocs/NinjaRMM-API-v2.yaml`
+  (or `.json`); a copy is also in this repo under `reference_material/NinjaRMM-API-v2.yaml`
 - [Device Filter Reference](./references/device-filters.md)
 - [Advanced Examples](./references/api-examples.md)
 - Related Skills:
   - [ninjaone-custom-fields](../ninjaone-custom-fields/SKILL.md) - Use API endpoints for bulk custom field operations across devices
-  - [ninjaone-tags](../ninjaone-tags/SKILL.md) - Create, delete, and merge tag definitions via API
+  - [ninjaone-tags](../ninjaone-tags/SKILL.md) - Device/endpoint tags (agent automation + CLI only; no REST API)
   - [ninjaone-environment-variables](../ninjaone-environment-variables/SKILL.md) - Use NINJA_AGENT_NODE_ID for device API calls
   - [ninjaone-script-variables](../ninjaone-script-variables/SKILL.md) - Pass API credentials securely via script variables

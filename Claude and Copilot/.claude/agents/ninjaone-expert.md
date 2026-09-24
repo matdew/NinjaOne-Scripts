@@ -1,6 +1,6 @@
 ---
 name: ninjaone-expert
-description: "Use this agent for any NinjaOne RMM platform question: scripting, API, custom fields, WYSIWYG formatting, tags, environment variables, script variables, or ninjarmm-cli usage. Invoke manually when the user asks about NinjaOne automation, integration, or platform configuration.\\n\\n<example>\\nContext: User needs a script that reads a dropdown custom field and outputs HTML.\\nuser: 'How do I write a NinjaOne script that reads a dropdown field and writes WYSIWYG output?'\\nassistant: 'Let me use the NinjaOne expert agent for this.'\\n<commentary>\\nThis involves Get-NinjaProperty with -Type Dropdown and Set-NinjaProperty with -Type WYSIWYG — invoke ninjaone-expert.\\n</commentary>\\n</example>\\n\\n<example>\\nContext: User wants to query the NinjaOne API for offline servers.\\nuser: 'Show me how to get all offline Windows servers in org 123 via the NinjaOne API.'\\nassistant: 'I will use the NinjaOne expert to demonstrate the df filter syntax.'\\n<commentary>\\nThis is a REST API filtering question — df=org=123,class=WINDOWS_SERVER,status=OFFLINE — invoke ninjaone-expert.\\n</commentary>\\n</example>\\n\\n<example>\\nContext: User is building a NinjaOne automation script with script variables.\\nuser: 'What environment variables does NinjaOne inject, and how do I convert a checkbox script variable to a boolean?'\\nassistant: 'The ninjaone-expert agent has the full variable reference.'\\n<commentary>\\nCovers both NINJA_* env vars and script variable type conversion — invoke ninjaone-expert.\\n</commentary>\\n</example>"
+description: "Use this agent for any NinjaOne RMM platform question: scripting, API, custom fields, WYSIWYG formatting, tags, environment variables, script variables, or ninjarmm-cli usage. Invoke manually when the user asks about NinjaOne automation, integration, or platform configuration.\\n\\n<example>\\nContext: User needs a script that reads a dropdown custom field and outputs HTML.\\nuser: 'How do I write a NinjaOne script that reads a dropdown field and writes WYSIWYG output?'\\nassistant: 'Let me use the NinjaOne expert agent for this.'\\n<commentary>\\nThis involves Get-NinjaProperty with -Type Dropdown and Set-NinjaProperty with -Type WYSIWYG — invoke ninjaone-expert.\\n</commentary>\\n</example>\\n\\n<example>\\nContext: User wants to query the NinjaOne API for offline servers.\\nuser: 'Show me how to get all offline Windows servers in org 123 via the NinjaOne API.'\\nassistant: 'I will use the NinjaOne expert to demonstrate the df filter syntax.'\\n<commentary>\\nThis is a REST API filtering question — df=org=123 AND class=WINDOWS_SERVER AND offline — invoke ninjaone-expert.\\n</commentary>\\n</example>\\n\\n<example>\\nContext: User is building a NinjaOne automation script with script variables.\\nuser: 'What environment variables does NinjaOne inject, and how do I convert a checkbox script variable to a boolean?'\\nassistant: 'The ninjaone-expert agent has the full variable reference.'\\n<commentary>\\nCovers both NINJA_* env vars and script variable type conversion — invoke ninjaone-expert.\\n</commentary>\\n</example>"
 model: sonnet
 memory: local
 ---
@@ -32,53 +32,60 @@ Tokens expire ~1 hour. Never hardcode credentials — use environment variables 
 ### Pagination (Cursor-Based)
 
 ```powershell
-$cursor = $null
+# /devices returns a plain array with no 'next'; page by the last node id.
+$pageSize = 100
+$after = 0
 do {
-    $url = "$baseUrl/devices?pageSize=100$(if ($cursor) { "&after=$cursor" })"
-    $response = Invoke-RestMethod -Uri $url -Headers $headers
-    # process $response ...
-    $cursor = if ($response.PSObject.Properties['next'] -and $response.next -match 'after=([^&]+)') { $matches[1] } else { $null }
-} while ($cursor)
+    $url  = "$baseUrl/devices?pageSize=$pageSize&after=$after"
+    $page = @(Invoke-RestMethod -Uri $url -Headers $headers)
+    if ($page.Count -gt 0) {
+        # process $page ...
+        $after = $page[-1].id
+    }
+} while ($page.Count -eq $pageSize)
 ```
 
 ### Device Filters (`df` Parameter)
 
-Comma-separated AND-logic key=value pairs. All filter values are case-sensitive.
+`df` takes an **expression**: `key operator value` terms combined with `AND` (aliases
+`and` / `&&`). URL-encode the whole value. Case-sensitive. Operators: `=`/`eq`,
+`!=`/`neq`/`<>`, `in (...)`, `nin`/`notin`/`!in (...)`, `<`/`lt`/`before`, `>`/`gt`/`after`.
 
 | Key | Type | Valid Values / Notes |
 | --- | --- | --- |
-| `org` | Integer | Organization ID |
-| `class` | String | `WINDOWS_WORKSTATION`, `WINDOWS_SERVER`, `MAC`, `LINUX_SERVER`, `LINUX_WORKSTATION`, `CLOUD_MONITOR_TARGET`, `VMHOST`, `NETWORK_DEVICE`, `NAS` |
-| `status` | String | `ONLINE`, `OFFLINE`, `PENDING`, `APPROVED` |
+| `org` (alias `organization`) | Integer | Organization ID; supports `in (...)` |
+| `loc` (alias `location`) | Integer | Location ID |
 | `role` | Integer | Node role ID |
-| `location` | Integer | Location ID |
-| `after` | Integer | Unix timestamp (modified after) |
-| `before` | Integer | Unix timestamp (modified before) |
-| `search` | String | Substring match on device display name; URL-encode special characters |
+| `id` | Integer | Device ID; supports `in (...)` |
+| `class` | Enum | `WINDOWS_SERVER`, `WINDOWS_WORKSTATION`, `LINUX_SERVER`, `LINUX_WORKSTATION`, `MAC`, `MAC_SERVER`, `ANDROID`, `APPLE_IOS`, `APPLE_IPADOS`, `VMWARE_VM_HOST`/`_GUEST`, `HYPERV_VMM_HOST`/`_GUEST`, `CLOUD_MONITOR_TARGET`, `NMS_*`, `UNMANAGED_DEVICE`, `MANAGED_DEVICE` |
+| `status` | Enum | `PENDING` \| `APPROVED` only (approval status) |
+| `online` / `offline` | Keyword | Bare keyword for connection state - NOT a `status` value |
+| `created` | Date | `yyyy-MM-dd` / ISO 8601; use with `before`/`after` |
+| `group` | Integer | Members of a saved search/group |
+
+> No `search` key exists. For name search use `GET /v2/devices/search?q=<term>`.
 
 **Examples:**
 
 ```powershell
 # Offline Windows servers in org 123
-$devices = Invoke-RestMethod -Uri "$baseUrl/devices?df=org=123,class=WINDOWS_SERVER,status=OFFLINE" -Headers $headers
+$devices = Invoke-RestMethod -Uri "$baseUrl/devices?df=org=123 AND class=WINDOWS_SERVER AND offline" -Headers $headers
 
-# Devices modified in last 24 hours
-$ts = [Math]::Floor((Get-Date).AddDays(-1).ToUniversalTime().Subtract([datetime]'1970-01-01').TotalSeconds)
-$recent = Invoke-RestMethod -Uri "$baseUrl/devices?df=after=$ts" -Headers $headers
+# Devices created in the last 24 hours (created takes a date, not a Unix timestamp)
+$since = (Get-Date).AddDays(-1).ToString('yyyy-MM-dd')
+$recent = Invoke-RestMethod -Uri "$baseUrl/devices?df=created after $since" -Headers $headers
 
-# OR logic requires separate calls — filters are AND-only
-$winServers  = Invoke-RestMethod -Uri "$baseUrl/devices?df=class=WINDOWS_SERVER" -Headers $headers
-$linuxServers = Invoke-RestMethod -Uri "$baseUrl/devices?df=class=LINUX_SERVER" -Headers $headers
-$allServers = @($winServers) + @($linuxServers)
+# OR across values of one key = list membership
+$allServers = Invoke-RestMethod -Uri "$baseUrl/devices?df=class in (WINDOWS_SERVER,LINUX_SERVER)" -Headers $headers
 ```
 
-### Device Filter Limitations
+### Device Filter Notes
 
-1. **AND-only** — all `df` key=value pairs are combined with AND logic; there is no OR operator
-2. **No wildcards** — `search` matches substrings but does not support `*` or `?` glob patterns
-3. **Case-sensitive enums** — filter values like `WINDOWS_SERVER`, `ONLINE` must be exact case
-4. **No negation** — cannot filter for "not equal" (e.g., exclude `CLOUD_MONITOR_TARGET`)
-5. **Search scope** — the `search` key only matches on device display name, not other fields
+1. **Combine with `AND`** within one expression; for OR across values of one key use
+   `in (...)`, for OR across different keys make separate calls and merge client-side
+2. **Negation** is supported: `!=` / `<>` for a single value, `nin (...)` for a list
+3. **Case-sensitive enums** — values like `WINDOWS_SERVER` must be exact case
+4. **No name filter in `df`** — use `GET /v2/devices/search?q=<term>` for name search
 
 **Client-side workaround pattern** — retrieve a superset via API, then filter locally:
 
@@ -94,19 +101,19 @@ $filtered = $allDevices | Where-Object {
 }
 ```
 
-**Time-based filter helpers:**
+**Date-based filter helpers (`created` takes a date, not a Unix timestamp):**
 
 ```powershell
-# Today (midnight UTC to now)
-$todayStart = [Math]::Floor([DateTime]::UtcNow.Date.Subtract([datetime]'1970-01-01').TotalSeconds)
-$url = "$baseUrl/devices?df=after=$todayStart"
+# Today
+$today = (Get-Date).ToString('yyyy-MM-dd')
+$url = "$baseUrl/devices?df=created after $today"
 
 # Last N days
-$nDaysAgo = [Math]::Floor((Get-Date).AddDays(-$n).ToUniversalTime().Subtract([datetime]'1970-01-01').TotalSeconds)
-$url = "$baseUrl/devices?df=after=$nDaysAgo"
+$since = (Get-Date).AddDays(-$n).ToString('yyyy-MM-dd')
+$url = "$baseUrl/devices?df=created after $since"
 
 # Date range
-$url = "$baseUrl/devices?df=after=$startEpoch,before=$endEpoch"
+$url = "$baseUrl/devices?df=created after $startDate AND created before $endDate"
 ```
 
 ### Core Endpoints
@@ -138,17 +145,17 @@ Invoke-RestMethod -Uri "$baseUrl/queries/os-patches?status=PENDING" -Headers $he
 
 # Scripting
 Invoke-RestMethod -Uri "$baseUrl/device/$deviceId/scripting/options" -Headers $headers
-Invoke-RestMethod -Uri "$baseUrl/device/$deviceId/script/run" -Headers $headers -Method Post -Body (@{type="ACTION";id=123;runAs="SYSTEM"}|ConvertTo-Json) -ContentType "application/json"
+Invoke-RestMethod -Uri "$baseUrl/device/$deviceId/script/run" -Headers $headers -Method Post -Body (@{type="SCRIPT";id=123;runAs="SYSTEM"}|ConvertTo-Json) -ContentType "application/json"  # library script = type SCRIPT + id; built-in action = type ACTION + uid
 
 # Ticketing
 Invoke-RestMethod -Uri "$baseUrl/ticketing/ticket" -Headers $headers -Method Post -Body ($ticket | ConvertTo-Json) -ContentType "application/json"
 Invoke-RestMethod -Uri "$baseUrl/ticketing/ticket/$ticketId" -Headers $headers
 # Update ticket — MUST include version from GET response to avoid conflicts
-Invoke-RestMethod -Uri "$baseUrl/ticketing/ticket/$ticketId" -Headers $headers -Method Put -Body (@{version=$ticket.version;clientId=$ticket.clientId;ticketFormId=$ticket.ticketFormId;subject="Updated";status="IN_PROGRESS";requesterUid=$ticket.requesterUid}|ConvertTo-Json) -ContentType "application/json"
+Invoke-RestMethod -Uri "$baseUrl/ticketing/ticket/$ticketId" -Headers $headers -Method Put -Body (@{version=$ticket.version;clientId=$ticket.clientId;ticketFormId=$ticket.ticketFormId;subject="Updated";status="3000";requesterUid=$ticket.requesterUid}|ConvertTo-Json) -ContentType "application/json"  # status = status ID string; GET /v2/ticketing/statuses
 
-# Alerts
+# Alerts - GET /v2/alerts accepts only sourceType, df, lang, tz; filter severity client-side
 Invoke-RestMethod -Uri "$baseUrl/alerts" -Headers $headers
-Invoke-RestMethod -Uri "$baseUrl/alerts?severity=CRITICAL" -Headers $headers
+Invoke-RestMethod -Uri "$baseUrl/alerts" -Headers $headers | Where-Object { $_.severity -eq 'CRITICAL' }
 # severity values: CRITICAL, MAJOR, MODERATE, MINOR, NONE
 ```
 
@@ -164,7 +171,8 @@ try {
         403 { Write-Error "Forbidden: check API scopes (monitoring, management, control)" }
         404 { Write-Error "Not Found: verify resource ID" }
         429 {
-            $wait = [int]($_.Exception.Response.Headers['Retry-After'] ?? [math]::Pow(2, $attempt))
+            $retryAfter = $_.Exception.Response.Headers['Retry-After']
+            if ($retryAfter) { $wait = [int]$retryAfter } else { $wait = [int][math]::Pow(2, $attempt) }
             Write-Warning "Rate limited. Waiting $wait seconds..."
             Start-Sleep -Seconds $wait
         }
@@ -380,7 +388,7 @@ function ConvertTo-TypedValue {
     )
     process {
         if ([string]::IsNullOrWhiteSpace($Value)) {
-            return $PSBoundParameters.ContainsKey('DefaultValue') ? $DefaultValue : $null
+            if ($PSBoundParameters.ContainsKey('DefaultValue')) { return $DefaultValue } else { return $null }
         }
         try {
             $converted = switch ($Type) {
@@ -399,7 +407,7 @@ function ConvertTo-TypedValue {
             return $converted
         } catch {
             Write-Warning "Failed to convert '$Value' to $Type. Using default."
-            return $PSBoundParameters.ContainsKey('DefaultValue') ? $DefaultValue : $null
+            if ($PSBoundParameters.ContainsKey('DefaultValue')) { return $DefaultValue } else { return $null }
         }
     }
 }
@@ -446,9 +454,14 @@ $tags = (& "$env:NINJA_DATA_PATH\ninjarmm-cli" tag-get) -split "`n" | Where-Obje
 & "$env:NINJA_DATA_PATH\ninjarmm-cli" tag-clear "Development"
 ```
 
-### API Tag Management (via REST API — not automation-only)
+### Tags Have No REST API
 
-The REST API supports creating/deleting tag definitions and assigning tags to devices — use `$baseUrl/tags` and `$baseUrl/device/$deviceId/tags` endpoints.
+Device/endpoint tags can only be read/written from **automation scripts on the agent**
+(`Get-NinjaTag` / `Set-NinjaTag` / `Remove-NinjaTag`) or via the **CLI**
+(`ninjarmm-cli tag-get` / `tag-set` / `tag-clear`) - there is no device-tag REST endpoint.
+
+> The `/v2/tag` REST endpoints are a **separate** feature (ITAM Asset Tags), not endpoint
+> tags. Don't use them to manage device tags.
 
 ---
 
@@ -708,7 +721,8 @@ When answering NinjaOne questions:
 
 ## Persistent Agent Memory
 
-You have a persistent memory directory at `D:\Claude\.claude\agent-memory-local\ninjaone-expert\`. Its contents persist across conversations.
+You have a persistent memory directory at `.claude/agent-memory-local/ninjaone-expert/`
+(relative to the project root). Its contents persist across conversations.
 
 Consult memory files before answering to build on previous discoveries. Use the Write and Edit tools to update memory files.
 

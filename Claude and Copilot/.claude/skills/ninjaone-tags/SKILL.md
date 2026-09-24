@@ -25,7 +25,7 @@ NinjaOne tags classify devices (endpoints) beyond roles and custom fields. Tags 
 
 ## Related Skills
 
-- [ninjaone-api](../ninjaone-api/SKILL.md) - Use REST API v2 endpoints to create, delete, list, and merge tags
+- [ninjaone-api](../ninjaone-api/SKILL.md) - Device/endpoint tags have no REST API (agent automation + CLI only); the REST `/v2/tag` endpoints are a separate feature (ITAM Asset Tags)
 - [ninjaone-custom-fields](../ninjaone-custom-fields/SKILL.md) - Store tag reports in custom fields for dashboard visibility
 - [ninjaone-environment-variables](../ninjaone-environment-variables/SKILL.md) - Use organization context for environment-based tagging
 - [ninjaone-cli](../ninjaone-cli/SKILL.md) - Alternative CLI commands for tag operations (tag-get, tag-set, tag-clear)

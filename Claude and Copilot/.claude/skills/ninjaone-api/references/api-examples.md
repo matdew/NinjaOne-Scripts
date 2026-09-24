@@ -15,37 +15,24 @@ function Get-AllNinjaDevices {
         [int]$PageSize = 100
     )
 
-    $allResults = [System.Collections.ArrayList]::new()
-    $cursor = $null
+    $allResults = [System.Collections.Generic.List[object]]::new()
+    $after = 0
 
     do {
-        $url = "$BaseUrl/devices?pageSize=$PageSize"
-        if ($cursor) {
-            $url += "&after=$cursor"
-        }
+        $url = "$BaseUrl/devices?pageSize=$PageSize&after=$after"
 
         try {
-            $response = Invoke-RestMethod -Uri $url -Headers $Headers
-
-            if ($response -is [array]) {
-                $allResults.AddRange($response)
-            } else {
-                [void]$allResults.Add($response)
-            }
-
-            # Extract next cursor
-            $cursor = $null
-            if ($response.PSObject.Properties['next']) {
-                $nextUrl = $response.next
-                if ($nextUrl -match 'after=([^&]+)') {
-                    $cursor = $matches[1]
-                }
+            # /devices returns a plain array with no 'next'; page by the last node id.
+            $page = @(Invoke-RestMethod -Uri $url -Headers $Headers)
+            if ($page.Count -gt 0) {
+                $allResults.AddRange($page)
+                $after = $page[-1].id
             }
         } catch {
             Write-Error "Failed to retrieve devices: $_"
             throw
         }
-    } while ($cursor)
+    } while ($page.Count -eq $PageSize)
 
     return $allResults.ToArray()
 }
@@ -83,15 +70,12 @@ function Update-NinjaDeviceCustomFields {
             -PercentComplete (($current / $total) * 100)
 
         try {
-            $body = $FieldUpdates.GetEnumerator() | ForEach-Object {
-                @{ name = $_.Key; value = $_.Value }
-            }
-
+            # Body is a flat object keyed by field name, e.g. @{ FieldName = "value" }
             Invoke-RestMethod `
                 -Uri "$BaseUrl/device/$deviceId/custom-fields" `
                 -Headers $Headers `
                 -Method Patch `
-                -Body ($body | ConvertTo-Json) `
+                -Body ($FieldUpdates | ConvertTo-Json) `
                 -ContentType "application/json"
 
             $results.Success += $deviceId
@@ -188,7 +172,7 @@ function Get-OfflineDevicesByOrg {
         [int]$OrgId
     )
 
-    $offline = Invoke-RestMethod -Uri "$BaseUrl/devices?df=org=$OrgId,status=OFFLINE" -Headers $Headers
+    $offline = Invoke-RestMethod -Uri "$BaseUrl/devices?df=org=$OrgId AND offline" -Headers $Headers
 
     return $offline | Select-Object `
         @{N='DeviceId';E={$_.id}},
@@ -210,7 +194,7 @@ function Find-CriticalServers {
     )
 
     # Get online Windows servers in specific org and location
-    $filter = "org=$OrgId,location=$LocationId,class=WINDOWS_SERVER,status=ONLINE"
+    $filter = "org=$OrgId AND location=$LocationId AND class=WINDOWS_SERVER AND online"
     $servers = Invoke-RestMethod -Uri "$BaseUrl/devices?df=$filter" -Headers $Headers
 
     # Further filter client-side for servers with role "Production"
@@ -230,10 +214,10 @@ function Get-RecentDevices {
         [int]$Days = 7
     )
 
-    $cutoffDate = (Get-Date).AddDays(-$Days)
-    $timestamp = [Math]::Floor($cutoffDate.ToUniversalTime().Subtract([datetime]'1970-01-01').TotalSeconds)
+    # 'created' takes a date (yyyy-MM-dd or ISO 8601), not a Unix timestamp
+    $cutoffDate = (Get-Date).AddDays(-$Days).ToString('yyyy-MM-dd')
 
-    $recent = Invoke-RestMethod -Uri "$BaseUrl/devices?df=after=$timestamp" -Headers $Headers
+    $recent = Invoke-RestMethod -Uri "$BaseUrl/devices?df=created after $cutoffDate" -Headers $Headers
 
     return $recent | Select-Object `
         displayName,
@@ -243,7 +227,7 @@ function Get-RecentDevices {
 }
 ```
 
-### Search Devices with Pagination
+### Search Devices by Name
 
 ```powershell
 function Search-Devices {
@@ -257,35 +241,15 @@ function Search-Devices {
         [Parameter(Mandatory)]
         [string]$SearchTerm,
 
-        [int]$PageSize = 100
+        [int]$Limit = 100
     )
 
+    # Name search is a dedicated endpoint (GET /v2/devices/search), NOT a df filter.
+    # It takes q (name, logged-on user, IP, etc.) + optional limit and returns { query, devices }.
     $encoded = [System.Web.HttpUtility]::UrlEncode($SearchTerm)
-    $allResults = [System.Collections.ArrayList]::new()
-    $cursor = $null
+    $result = Invoke-RestMethod -Uri "$BaseUrl/devices/search?q=$encoded&limit=$Limit" -Headers $Headers
 
-    do {
-        $url = "$BaseUrl/devices?df=search=$encoded&pageSize=$PageSize"
-        if ($cursor) {
-            $url += "&after=$cursor"
-        }
-
-        $response = Invoke-RestMethod -Uri $url -Headers $Headers
-
-        if ($response) {
-            [void]$allResults.AddRange(@($response))
-        }
-
-        $cursor = $null
-        if ($response.PSObject.Properties['next']) {
-            $nextUrl = $response.next
-            if ($nextUrl -match 'after=([^&]+)') {
-                $cursor = $matches[1]
-            }
-        }
-    } while ($cursor)
-
-    return $allResults.ToArray()
+    return $result.devices
 }
 ```
 
@@ -309,7 +273,7 @@ function Get-DeviceDistributionReport {
     )
 
     $report = foreach ($class in $classes) {
-        $devices = Invoke-RestMethod -Uri "$BaseUrl/devices?df=org=$OrgId,class=$class" -Headers $Headers
+        $devices = Invoke-RestMethod -Uri "$BaseUrl/devices?df=org=$OrgId AND class=$class" -Headers $Headers
 
         [PSCustomObject]@{
             DeviceClass = $class
@@ -335,7 +299,7 @@ function Get-PendingApprovals {
 
     $filter = "status=PENDING"
     if ($OrgId) {
-        $filter += ",org=$OrgId"
+        $filter += " AND org=$OrgId"
     }
 
     $pending = Invoke-RestMethod -Uri "$BaseUrl/devices?df=$filter" -Headers $Headers
