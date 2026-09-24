@@ -79,10 +79,10 @@ Different scripting languages use different syntax to reference environment vari
 
 | Script Type | Reference Syntax | Example |
 |-------------|------------------|---------|
-| **PowerShell** | `$env:<variablename>` | `$env:ServerName` |
-| **Batch** | `%<variablename>%` | `%ServerName%` |
-| **VBScript** | `CreateObject("WScript.Shell").ExpandEnvironmentStrings("%variablename%")` | `serverName = CreateObject("WScript.Shell").ExpandEnvironmentStrings("%ServerName%")` |
-| **ShellScript** | `$<variablename>` | `$ServerName` |
+| **PowerShell** | `$env:<variableName>` | `$env:serverName` |
+| **Batch** | `%<variableName>%` | `%serverName%` |
+| **VBScript** | `CreateObject("WScript.Shell").ExpandEnvironmentStrings("%variableName%")` | `serverName = CreateObject("WScript.Shell").ExpandEnvironmentStrings("%serverName%")` |
+| **ShellScript** | `$<variableName>` | `$serverName` |
 
 ### Inserting Variables in Script Editor
 
@@ -97,7 +97,7 @@ Different scripting languages use different syntax to reference environment vari
 
 ```powershell
 # Script variables from NinjaOne (received as environment variables)
-$serverName = $env:ServerName
+$serverName = $env:serverName
 if ([string]::IsNullOrWhiteSpace($serverName)) {
     Write-Error "ServerName is required but was not provided"
     exit 1
@@ -105,9 +105,9 @@ if ([string]::IsNullOrWhiteSpace($serverName)) {
 
 # Convert and validate Port (Integer type)
 $port = 443
-if (-not [string]::IsNullOrWhiteSpace($env:Port)) {
+if (-not [string]::IsNullOrWhiteSpace($env:port)) {
     try {
-        $port = [int]$env:Port
+        $port = [int]$env:port
         if ($port -lt 1 -or $port -gt 65535) {
             Write-Warning "Port value '$port' is outside valid range. Using default: 443"
             $port = 443
@@ -120,15 +120,15 @@ if (-not [string]::IsNullOrWhiteSpace($env:Port)) {
 
 # Convert checkbox/boolean
 $enableLogging = $false
-if (-not [string]::IsNullOrWhiteSpace($env:EnableLogging)) {
-    $enableLogging = $env:EnableLogging -eq 'true'
+if (-not [string]::IsNullOrWhiteSpace($env:enableLogging)) {
+    $enableLogging = $env:enableLogging -eq 'true'
 }
 
 # Convert Date/Time (ISO 8601 format)
 $maintenanceWindow = $null
-if (-not [string]::IsNullOrWhiteSpace($env:MaintenanceWindow)) {
+if (-not [string]::IsNullOrWhiteSpace($env:maintenanceWindow)) {
     try {
-        $maintenanceWindow = [DateTime]::Parse($env:MaintenanceWindow, $null, [System.Globalization.DateTimeStyles]::RoundtripKind)
+        $maintenanceWindow = [DateTime]::Parse($env:maintenanceWindow, $null, [System.Globalization.DateTimeStyles]::RoundtripKind)
     } catch {
         Write-Warning "Failed to parse MaintenanceWindow. Ignoring."
     }
@@ -136,9 +136,9 @@ if (-not [string]::IsNullOrWhiteSpace($env:MaintenanceWindow)) {
 
 # Validate IP Address
 $ipAddress = $null
-if (-not [string]::IsNullOrWhiteSpace($env:IPAddress)) {
+if (-not [string]::IsNullOrWhiteSpace($env:ipAddress)) {
     try {
-        $ipAddress = [System.Net.IPAddress]::Parse($env:IPAddress)
+        $ipAddress = [System.Net.IPAddress]::Parse($env:ipAddress)
     } catch {
         Write-Warning "Invalid IP Address format. Ignoring."
     }
@@ -150,8 +150,8 @@ if (-not [string]::IsNullOrWhiteSpace($env:IPAddress)) {
 ```vbscript
 ' VBScript requires explicit environment variable expansion
 Set wshShell = CreateObject("WScript.Shell")
-serverName = wshShell.ExpandEnvironmentStrings("%ServerName%")
-port = wshShell.ExpandEnvironmentStrings("%Port%")
+serverName = wshShell.ExpandEnvironmentStrings("%serverName%")
+port = wshShell.ExpandEnvironmentStrings("%port%")
 
 If serverName = "" Then
     WScript.Echo "ServerName is required"
@@ -171,8 +171,8 @@ End If
 ```batch
 @echo off
 REM Batch script variables
-SET SERVER_NAME=%ServerName%
-SET PORT=%Port%
+SET SERVER_NAME=%serverName%
+SET PORT=%port%
 
 IF "%SERVER_NAME%"=="" (
     echo ServerName is required
@@ -195,10 +195,10 @@ function ConvertTo-TypedValue {
         Converts NinjaOne script variable (string) to specified type with validation.
 
     .EXAMPLE
-        $port = ConvertTo-TypedValue -Value $env:Port -Type 'Int32' -DefaultValue 443 -Min 1 -Max 65535
+        $port = ConvertTo-TypedValue -Value $env:port -Type 'Int32' -DefaultValue 443 -Min 1 -Max 65535
 
     .EXAMPLE
-        $enabled = ConvertTo-TypedValue -Value $env:EnableFeature -Type 'Boolean' -DefaultValue $false
+        $enabled = ConvertTo-TypedValue -Value $env:enableFeature -Type 'Boolean' -DefaultValue $false
     #>
     [CmdletBinding()]
     param(
@@ -328,8 +328,8 @@ net user "$Username" "$Password" /add
 
 ## Common Mistakes
 
-1. **Not handling empty strings for non-mandatory variables** - Non-mandatory variables arrive as empty strings `""` when not filled in, not as `$null`. Direct type casts like `[int]$env:Port` throw an exception on an empty string. Always guard with `[string]::IsNullOrWhiteSpace($env:Port)` before converting.
-2. **Checkbox comparison against the wrong value** - Checkbox variables send `"true"` or `"false"` as strings, not PowerShell booleans. `if ($env:EnableFeature)` is always `$true` for a non-empty string. Use `$env:EnableFeature -eq 'true'` for correct boolean evaluation.
+1. **Not handling empty strings for non-mandatory variables** - Non-mandatory variables arrive as empty strings `""` when not filled in, not as `$null`. Direct type casts like `[int]$env:port` throw an exception on an empty string. Always guard with `[string]::IsNullOrWhiteSpace($env:port)` before converting.
+2. **Checkbox comparison against the wrong value** - Checkbox variables send `"true"` or `"false"` as strings, not PowerShell booleans. `if ($env:enableFeature)` is always `$true` for a non-empty string. Use `$env:enableFeature -eq 'true'` for correct boolean evaluation.
 3. **Special characters in variable names** - Characters like `&`, `|`, `;`, `$`, and backtick cannot be used in variable names or values. Scripts with these characters fail at runtime without a clear error.
 4. **Naming conflicts with system environment variables** - If a script variable shares a name with an existing system environment variable (e.g., `PATH`, `TEMP`), the script will fail or use the wrong value. Prefix custom variable names (e.g., `NR_Port`) to avoid collisions.
 5. **Assuming DateTime locale** - Date/Time variables use ISO 8601 with timezone (`YYYY-MM-ddTHH:MM:SS.SSSZ`). Parsing with `[DateTime]::Parse($value)` without `DateTimeStyles.RoundtripKind` loses timezone info and can shift the time. Use `[DateTime]::Parse($value, $null, [System.Globalization.DateTimeStyles]::RoundtripKind)`.

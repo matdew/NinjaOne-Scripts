@@ -1,0 +1,16 @@
+{
+    "default": true,
+    // Skill and agent Markdown files begin with YAML frontmatter and lead with prose,
+    // so the first content line is intentionally not a top-level heading.
+    "MD041": false,
+    // Reference tables across these authoring docs use compact pipe delimiters; the
+    // padding style is cosmetic and not worth enforcing here.
+    "MD060": false,
+    // Many fenced blocks are illustrative (directory trees, chat prompts, CLI snippets)
+    // where a syntax-highlight language adds no value.
+    "MD040": false,
+    // Long descriptive lines and wide reference tables are intentional in this content.
+    "MD013": false,
+    // WYSIWYG and card examples embed inline HTML by design.
+    "MD033": false
+}

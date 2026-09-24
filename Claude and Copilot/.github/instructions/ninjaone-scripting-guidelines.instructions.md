@@ -9,8 +9,7 @@ This guide provides NinjaOne RMM platform-specific instructions for GitHub Copil
 
 ## Related Skills
 
-This instruction set works with the following specialized skill files located in `.claude/skills/`.
-To load a skill in GitHub Copilot chat, use `#file:.claude/skills/<skill-name>/SKILL.md`.
+This instruction set works with the following specialized skill files in `.claude/skills/`. Both Claude Code and VS Code GitHub Copilot discover these skills automatically; you can also load one on demand in Copilot chat with `#file:.claude/skills/<skill-name>/SKILL.md`.
 
 - **ninjaone-api** (`#file:.claude/skills/ninjaone-api/SKILL.md`) - REST API v2 for automation, integration, and data retrieval via HTTP requests
 - **ninjaone-environment-variables** (`#file:.claude/skills/ninjaone-environment-variables/SKILL.md`) - NinjaOne agent environment variables and organization context
@@ -27,8 +26,18 @@ To load a skill in GitHub Copilot chat, use `#file:.claude/skills/<skill-name>/S
 NinjaOne RMM provides three primary mechanisms for script configuration:
 
 1. **Environment Variables** (`$env:NINJA_*`) - Agent-provided context (organization, location, paths)
-2. **Script Variables** (`$env:VariableName`) - User-defined parameters converted to environment variables
+2. **Script Variables** (`$env:variableName`) - User-defined parameters converted to environment variables
 3. **Custom Fields** - Persistent device and organization data accessed via PowerShell module or CLI
+
+> **Script variable and custom field name → env var conversion:**
+> NinjaOne lowercases the first letter of the name and camelCases the rest (spaces removed).
+> Both **script variable names** and **custom field names** follow this camelCase pattern — lowercase first letter, uppercase subsequent words, never PascalCase.
+>
+> - `Port` becomes `$env:port`
+> - `Server Name` becomes `$env:serverName`
+> - `Output File` becomes `$env:outputFile`
+>
+> Always reference variables with camelCase `$env:` names (lowercase first letter).
 
 ### Standard Script Structure
 
@@ -44,7 +53,7 @@ NinjaOne RMM provides three primary mechanisms for script configuration:
     NinjaOne Script Variables (define these in the NinjaOne platform):
     - VariableName1 (Type): Description and default value if any
     - VariableName2 (Type): Description and default value if any
-    
+
     NinjaOne Environment Variables Used:
     - NINJA_ORGANIZATION_NAME
     - NINJA_DATA_PATH (or other relevant variables)
@@ -60,14 +69,14 @@ param()
 #region Script Variables Validation
 Write-Verbose "Validating script variables for org: $env:NINJA_ORGANIZATION_NAME"
 
-$requiredVar = $env:RequiredVariable
+$requiredVar = $env:requiredVariable
 if ([string]::IsNullOrWhiteSpace($requiredVar)) {
-    Write-Error "Required variable 'RequiredVariable' is not set"
+    Write-Error "Required variable 'requiredVariable' is not set"
     exit 1
 }
 
-$optionalPort    = ConvertTo-TypedValue -Value $env:Port    -Type 'Int32'   -DefaultValue 443   -Min 1 -Max 65535
-$optionalEnabled = ConvertTo-TypedValue -Value $env:Enabled -Type 'Boolean' -DefaultValue $false
+$optionalPort    = ConvertTo-TypedValue -Value $env:port    -Type 'Int32'   -DefaultValue 443   -Min 1 -Max 65535
+$optionalEnabled = ConvertTo-TypedValue -Value $env:enabled -Type 'Boolean' -DefaultValue $false
 
 Write-Verbose "Variables validated"
 #endregion
@@ -75,9 +84,9 @@ Write-Verbose "Variables validated"
 #region Main Script Logic
 try {
     Write-Verbose "Starting in org: $env:NINJA_ORGANIZATION_NAME (node: $env:NINJA_AGENT_NODE_ID)"
-    
+
     # Main script functionality here
-    
+
     Write-Output "Script completed successfully"
     exit 0
 } catch {
@@ -94,7 +103,7 @@ try {
 Available in all script types on all platforms. Require a device reboot to refresh if changed.
 
 | Variable | Description |
-|----------|-------------|
+| --- | --- |
 | `$env:NINJA_EXECUTING_PATH` | Agent install directory |
 | `$env:NINJA_AGENT_VERSION_INSTALLED` | Installed agent version |
 | `$env:NINJA_PATCHER_VERSION_INSTALLED` | Installed patcher version |
@@ -113,7 +122,7 @@ Available in all script types on all platforms. Require a device reboot to refre
 NinjaOne converts all script variables to environment variables at runtime. **All arrive as strings — explicit type conversion is required.**
 
 | Type | Wire Format | Example |
-|------|-------------|---------|
+| --- | --- | --- |
 | String/Text | Plain string | `"Hello World"` |
 | Integer | String digits | `"314"` |
 | Decimal | String float | `"3.14"` |
@@ -158,11 +167,11 @@ function Invoke-NinjaOperation {
     process {
         try {
             Write-Verbose "Executing operation: $OperationName"
-            
+
             # Operation logic here
-            
+
             Write-Output "Operation '$OperationName' completed successfully"
-            
+
         } catch {
             $errorMessage = $_.Exception.Message
             Write-Error "Operation '$OperationName' failed: $errorMessage"
@@ -199,3 +208,4 @@ try {
 14. **Structure output for readability** - Structure script output for activity log readability — NinjaOne captures all output
 15. **Unicode support** - Full Unicode including emojis is supported in all text fields and CLI
 16. **Character limits** - Text (200), MultiLine (10,000), Secure (200–10,000), WYSIWYG (200,000)
+17. **Reference related skills** - When using tags, custom fields, API operations, or WYSIWYG formatting, load the corresponding skill file in `.claude/skills/` for detailed patterns and examples

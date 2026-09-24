@@ -21,7 +21,6 @@ The NinjaOne agent provides built-in environment variables accessible via `$env:
 
 - **Cross-Platform:** Variables work on Windows, macOS, and Linux
 - **Reboot Required:** If variables don't update, reboot the target device
-- **Security:** Never log `NINJA_AGENT_PASSWORD` in plain text
 - **Automation Context:** Variables only available when running via NinjaOne agent
 
 ## Related Skills
@@ -40,7 +39,6 @@ The NinjaOne agent provides the following built-in environment variables accessi
   - `$env:NINJA_AGENT_VERSION_INSTALLED` - Current agent version
   - `$env:NINJA_PATCHER_VERSION_INSTALLED` - Current patcher version
   - `$env:NINJA_DATA_PATH` - Agent data folder (scripts, policy, downloads, logs)
-  - `$env:NINJA_AGENT_PASSWORD` - Agent password for obtaining session key
   - `$env:NINJA_AGENT_MACHINE_ID` - Machine ID used on the server
 
 - **Organization Context:**
@@ -83,8 +81,6 @@ function Get-NinjaEnvironmentInfo {
             AgentVersion    = $env:NINJA_AGENT_VERSION_INSTALLED
             PatcherVersion  = $env:NINJA_PATCHER_VERSION_INSTALLED
             DataPath        = $env:NINJA_DATA_PATH
-            # AgentPassword is intentionally omitted — never include in returned objects
-            # or logs. Use $env:NINJA_AGENT_PASSWORD directly only where needed for session key auth.
             MachineId       = $env:NINJA_AGENT_MACHINE_ID
             NodeId          = $env:NINJA_AGENT_NODE_ID
             Organization    = $env:NINJA_ORGANIZATION_NAME
@@ -130,8 +126,6 @@ echo "Data Path: $NINJA_DATA_PATH"
 3. **File Operations** - Use `$env:NINJA_DATA_PATH` for agent-related file operations and temporary files
 4. **Agent Executables** - Reference `$env:NINJA_EXECUTING_PATH` when calling agent executables or binaries
 5. **Node Identification** - Use `$env:NINJA_AGENT_NODE_ID` for unique device identification in APIs
-6. **Session Keys** - Use `$env:NINJA_AGENT_PASSWORD` when obtaining session keys for API calls
-7. **Cross-Platform Scripts** - These variables work across Windows, macOS, and Linux
-8. **Reboot After Changes** - If variables don't update, reboot the target device
-9. **Security** - Avoid logging `$env:NINJA_AGENT_PASSWORD` in plain text
-10. **Version Checks** - Use version variables for compatibility checks before running features
+6. **Cross-Platform Scripts** - These variables work across Windows, macOS, and Linux
+7. **Reboot After Changes** - If variables don't update, reboot the target device
+8. **Version Checks** - Use version variables for compatibility checks before running features

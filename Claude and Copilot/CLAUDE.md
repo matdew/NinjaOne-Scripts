@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working in this repository.
 
 ## Repository Overview
 
-`NinjaOne-Scripts` is a collection of PowerShell automation scripts for the NinjaOne RMM platform. Scripts integrate with the NinjaOne agent environment, REST API v2, and platform services (custom fields, tags, WYSIWYG reporting).
+This repository contains PowerShell automation scripts for the NinjaOne RMM platform. Scripts integrate with the NinjaOne agent environment, REST API v2, and platform services (custom fields, tags, WYSIWYG reporting).
 
 ## Skills
 
@@ -21,6 +21,7 @@ All NinjaOne-specific knowledge lives in `.claude/skills/`. Invoke skills via th
 | `ninjaone-tags` | Device tagging via PowerShell cmdlets and CLI |
 
 For API reference material (pagination helpers, device filter examples), see:
+
 - `.claude/skills/ninjaone-api/references/api-examples.md`
 - `.claude/skills/ninjaone-api/references/device-filters.md`
 
@@ -28,7 +29,7 @@ For API reference material (pagination helpers, device filter examples), see:
 
 The `ninjaone-expert` agent consolidates all seven skill domains into a single expert persona.
 
-- **Location:** `.claude/skills/agents/ninjaone-expert.md`
+- **Location:** `.claude/agents/ninjaone-expert.md`
 - **Model:** Sonnet
 - **Memory:** Persistent at `.claude/agent-memory-local/ninjaone-expert/`
 
@@ -39,6 +40,7 @@ Invoke for any multi-domain NinjaOne question (e.g., read a dropdown field and w
 ### Script Structure
 
 Scripts follow a standard three-section pattern:
+
 1. SYNOPSIS/DESCRIPTION block — document NinjaOne script variables and env vars used
 2. `#region Script Variables Validation` — validate and convert all `$env:` script variables
 3. `#region Main Script Logic` — wrapped in `try`/`catch` with exit codes
@@ -51,12 +53,12 @@ Scripts follow a standard three-section pattern:
 
 ### Script Variables
 
-NinjaOne injects script variables as environment variables (`$env:VariableName`). All arrive as strings — convert explicitly:
+NinjaOne injects script variables as environment variables (`$env:variableName` — camelCase, lowercase first letter). All arrive as strings — convert explicitly:
 
 ```powershell
-$enabled = [bool]::Parse($env:EnableFeature)   # Checkbox -> bool
-$count   = [int]$env:MaxCount                  # Integer -> int
-$date    = [datetime]$env:TargetDate           # Date    -> datetime
+$enabled = [bool]::Parse($env:enableFeature)   # Checkbox -> bool
+$count   = [int]$env:maxCount                  # Integer -> int
+$date    = [datetime]$env:targetDate           # Date    -> datetime
 ```
 
 ### Custom Fields (Preferred Approach)

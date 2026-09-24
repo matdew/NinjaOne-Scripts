@@ -46,7 +46,7 @@ do {
 Comma-separated AND-logic key=value pairs. All filter values are case-sensitive.
 
 | Key | Type | Valid Values / Notes |
-|-----|------|---------------------|
+| --- | --- | --- |
 | `org` | Integer | Organization ID |
 | `class` | String | `WINDOWS_WORKSTATION`, `WINDOWS_SERVER`, `MAC`, `LINUX_SERVER`, `LINUX_WORKSTATION`, `CLOUD_MONITOR_TARGET`, `VMHOST`, `NETWORK_DEVICE`, `NAS` |
 | `status` | String | `ONLINE`, `OFFLINE`, `PENDING`, `APPROVED` |
@@ -57,6 +57,7 @@ Comma-separated AND-logic key=value pairs. All filter values are case-sensitive.
 | `search` | String | Substring match on device display name; URL-encode special characters |
 
 **Examples:**
+
 ```powershell
 # Offline Windows servers in org 123
 $devices = Invoke-RestMethod -Uri "$baseUrl/devices?df=org=123,class=WINDOWS_SERVER,status=OFFLINE" -Headers $headers
@@ -189,7 +190,7 @@ These are signature-level descriptions — generate full implementations on dema
 ### CLI Paths
 
 | Platform | Path | Variable |
-|----------|------|----------|
+| --- | --- | --- |
 | Windows | `C:\ProgramData\NinjaRMMAgent\ninjarmm-cli.exe` | `%NINJARMMCLI%` |
 | macOS | `/Applications/NinjaRMMAgent/programdata/ninjarmm-cli` | — |
 | Linux | `/opt/NinjaRMMAgent/programdata/ninjarmm-cli` | prefix with `./` |
@@ -241,6 +242,7 @@ REM Single-document templates omit "Document Name"
 %NINJARMMCLI% set APIKey %SecretValue%
 @echo on
 ```
+
 Never use `set -x` before secure operations on Linux/macOS.
 
 ---
@@ -271,7 +273,7 @@ Set-NinjaProperty -Name "Environment" -Value "Production" -Type "Dropdown"  # fr
 ### Complete Field Type Reference
 
 | Type String | Get Returns | Set Accepts | Notes |
-|-------------|-------------|-------------|-------|
+| --- | --- | --- | --- |
 | `Attachment` | JSON file info | read-only | Managed via web UI; max 20 MB |
 | `Checkbox` | Boolean | `$true`/`$false` or `0`/`1` | — |
 | `Date` | DateTime | DateTime, epoch seconds, ISO string | — |
@@ -322,12 +324,11 @@ Ninja-Property-Docs-Clear-Single "Network Config" "Gateway"
 Available in all script types (PowerShell, Batch, Shell, VBScript) on all platforms. Require a device reboot to refresh if changed.
 
 | Variable | Description |
-|----------|-------------|
+| --- | --- |
 | `$env:NINJA_EXECUTING_PATH` | Agent install directory |
 | `$env:NINJA_AGENT_VERSION_INSTALLED` | Installed agent version |
 | `$env:NINJA_PATCHER_VERSION_INSTALLED` | Installed patcher version |
 | `$env:NINJA_DATA_PATH` | Agent data folder (scripts, logs, downloads) |
-| `$env:NINJA_AGENT_PASSWORD` | Agent password for session key auth — never log in plain text |
 | `$env:NINJA_AGENT_MACHINE_ID` | Machine ID on NinjaOne server |
 | `$env:NINJA_AGENT_NODE_ID` | Node ID for API calls and device identification |
 | `$env:NINJA_ORGANIZATION_NAME` | Organization name |
@@ -355,7 +356,7 @@ NinjaOne converts platform-defined script variables into environment variables a
 ### Variable Types and Wire Formats
 
 | Type | Wire Format | Example |
-|------|-------------|---------|
+| --- | --- | --- |
 | String/Text | Plain string | `"Hello World"` |
 | Integer | String digits | `"314"` |
 | Decimal | String float | `"3.14"` |
@@ -404,9 +405,9 @@ function ConvertTo-TypedValue {
 }
 
 # Usage
-$port    = ConvertTo-TypedValue -Value $env:Port -Type 'Int32' -DefaultValue 443 -Min 1 -Max 65535
-$enabled = ConvertTo-TypedValue -Value $env:EnableFeature -Type 'Boolean' -DefaultValue $false
-$date    = ConvertTo-TypedValue -Value $env:MaintenanceDate -Type 'DateTime'
+$port    = ConvertTo-TypedValue -Value $env:port -Type 'Int32' -DefaultValue 443 -Min 1 -Max 65535
+$enabled = ConvertTo-TypedValue -Value $env:enableFeature -Type 'Boolean' -DefaultValue $false
+$date    = ConvertTo-TypedValue -Value $env:maintenanceDate -Type 'DateTime'
 ```
 
 ---
@@ -455,7 +456,7 @@ The REST API supports creating/deleting tag definitions and assigning tags to de
 
 ### Allowed HTML Elements
 
-```
+```text
 <a> <blockquote> <caption> <code> <col> <div>
 <h1>–<h6> <i> <li> <ol> <p> <pre>
 <span> <table> <tbody> <td> <tfoot> <th> <thead> <tr> <ul>
@@ -471,6 +472,7 @@ The REST API supports creating/deleting tag definitions and assigning tags to de
 ### NinjaOne CSS Classes
 
 **Cards:**
+
 ```html
 <div class="card flex-grow-1">
   <div class="card-title-box">
@@ -483,6 +485,7 @@ The REST API supports creating/deleting tag definitions and assigning tags to de
 ```
 
 **Tables with row status:**
+
 ```html
 <tr class="success"><td>Running</td></tr>
 <tr class="danger"><td>Stopped</td></tr>
@@ -490,6 +493,7 @@ The REST API supports creating/deleting tag definitions and assigning tags to de
 ```
 
 **Info Cards:**
+
 ```html
 <div class="info-card success">
   <i class="info-icon fa-solid fa-circle-check"></i>
@@ -502,6 +506,7 @@ The REST API supports creating/deleting tag definitions and assigning tags to de
 ```
 
 **Stat Cards:**
+
 ```html
 <div class="stat-card">
   <div class="stat-value"><span style="color: #008001;">25</span></div>
@@ -547,6 +552,7 @@ The REST API supports creating/deleting tag definitions and assigning tags to de
 ### Charts.css
 
 **Bar Chart:**
+
 ```html
 <table class="charts-css bar show-heading">
   <tbody>
@@ -559,6 +565,7 @@ The REST API supports creating/deleting tag definitions and assigning tags to de
 **Column Chart:** `class="charts-css column show-heading"`
 
 **Pie Chart:** (wrap in sized div)
+
 ```html
 <div style="height:300px; width:300px;">
   <table class="charts-css pie">
@@ -627,14 +634,14 @@ param()
 #region Script Variables Validation
 Write-Verbose "Validating script variables for org: $env:NINJA_ORGANIZATION_NAME"
 
-$requiredVar = $env:RequiredVariable
+$requiredVar = $env:requiredVariable
 if ([string]::IsNullOrWhiteSpace($requiredVar)) {
-    Write-Error "Required variable 'RequiredVariable' is not set"
+    Write-Error "Required variable 'requiredVariable' is not set"
     exit 1
 }
 
-$optionalPort = ConvertTo-TypedValue -Value $env:Port -Type 'Int32' -DefaultValue 443 -Min 1 -Max 65535
-$optionalEnabled = ConvertTo-TypedValue -Value $env:Enabled -Type 'Boolean' -DefaultValue $false
+$optionalPort = ConvertTo-TypedValue -Value $env:port -Type 'Int32' -DefaultValue 443 -Min 1 -Max 65535
+$optionalEnabled = ConvertTo-TypedValue -Value $env:enabled -Type 'Boolean' -DefaultValue $false
 
 Write-Verbose "Variables validated"
 #endregion
@@ -657,6 +664,7 @@ try {
 **Exit codes:** `0` = success, `1` = general failure, `2+` = specific documented errors
 
 **Output streams:**
+
 - `Write-Output` — visible in NinjaOne activity log
 - `Write-Verbose` — detailed logging (enable via script settings)
 - `Write-Warning` — non-critical issues
@@ -705,12 +713,14 @@ You have a persistent memory directory at `D:\Claude\.claude\agent-memory-local\
 Consult memory files before answering to build on previous discoveries. Use the Write and Edit tools to update memory files.
 
 Guidelines:
+
 - `MEMORY.md` is loaded into your system prompt — keep it concise (under 200 lines)
 - Create separate topic files (e.g., `field-names.md`, `api-patterns.md`) for detailed notes
 - Organize by topic, not chronologically
 - Update or remove entries that turn out to be wrong
 
 What to save:
+
 - Project-specific custom field names and their types discovered during sessions
 - Organization-specific naming conventions and patterns
 - API patterns and credentials approach used in this workspace
@@ -718,6 +728,7 @@ What to save:
 - Common errors encountered and their solutions
 
 What NOT to save:
+
 - Session-specific task details or temporary state
 - Generic NinjaOne documentation already embedded in this system prompt
 

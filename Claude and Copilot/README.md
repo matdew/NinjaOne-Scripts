@@ -1,17 +1,21 @@
 # NinjaOne Scripts: AI Assistance for GitHub Copilot and Claude Code
 
-This repository adds NinjaOne RMM platform knowledge to **GitHub Copilot** and **Claude Code**. Copy two directories into your existing NinjaOne scripts repository to get contextual suggestions, type-conversion helpers, API patterns, and WYSIWYG formatting guidance — specific to the NinjaOne platform.
+This repository adds NinjaOne RMM platform knowledge to **GitHub Copilot** and **Claude Code**. Copy the included directories and files into your existing NinjaOne scripts repository to get contextual suggestions, type-conversion helpers, API patterns, and WYSIWYG formatting guidance — specific to the NinjaOne platform.
 
 ---
 
 ## Repository Structure
 
 ```
+AGENTS.md                                           # Shared project overview (Copilot/Codex)
+CLAUDE.md                                           # Claude Code project instructions
+
 .github/
   instructions/
     ninjaone-scripting-guidelines.instructions.md   # Auto-applied to *.ps1 files (Copilot)
 
 .claude/
+  .markdownlint.jsonc                               # Lint config for skill/agent Markdown
   skills/
     ninjaone-api/SKILL.md                           # REST API v2
     ninjaone-environment-variables/SKILL.md         # $env:NINJA_* variables
@@ -20,10 +24,8 @@ This repository adds NinjaOne RMM platform knowledge to **GitHub Copilot** and *
     ninjaone-cli/SKILL.md                           # ninjarmm-cli and legacy cmdlets
     ninjaone-wysiwyg/SKILL.md                       # HTML/CSS for WYSIWYG fields
     ninjaone-tags/SKILL.md                          # Device tagging
-    agents/
-      ninjaone-expert.md                            # All-domains expert agent (Claude Code)
-
-CLAUDE.md                                           # Claude Code project instructions
+  agents/
+    ninjaone-expert.md                              # All-domains expert agent (both tools)
 ```
 
 ---
@@ -48,16 +50,16 @@ Both Copilot and Claude Code read from the same skill files — answers are cons
 
 ## Setup
 
-Copy these two directories into the root of scripting directory:
+Copy these directories and files into the root of your scripting repository:
 
 ```
 .github/
 .claude/
+AGENTS.md
+CLAUDE.md
 ```
 
-If you use Claude Code, also copy `CLAUDE.md`.
-
-No other configuration is required.
+Both GitHub Copilot and Claude Code discover the skills, expert agent, and instructions natively. No other configuration is required.
 
 ---
 
@@ -68,13 +70,14 @@ No other configuration is required.
 The instructions file is applied automatically to all `.ps1` and `.psm1` files via the `applyTo` field in its frontmatter. Once copied, Copilot will use NinjaOne-aware guidance whenever you edit a PowerShell script — no extra steps needed.
 
 The instructions file includes:
+
 - A standard script template with `ConvertTo-TypedValue` usage
 - Quick-reference tables for all `$env:NINJA_*` environment variables and script variable wire formats
 - A 16-item best practices summary
 
 ### Loading skill files in Copilot chat
 
-For questions that require deeper domain knowledge, load a skill file directly in Copilot chat using the `#file:` syntax:
+Copilot discovers the skills in `.claude/skills/` automatically and loads the relevant one when your request matches its description. To force a specific skill into context, reference it directly in Copilot chat using the `#file:` syntax:
 
 ```
 #file:.claude/skills/ninjaone-api/SKILL.md
@@ -90,6 +93,10 @@ How do I convert a checkbox script variable to a boolean?
 #file:.claude/skills/ninjaone-wysiwyg/SKILL.md
 Generate an HTML status card for a service health report.
 ```
+
+### The ninjaone-expert agent in Copilot
+
+The `ninjaone-expert` agent in `.claude/agents/` is also discovered by Copilot. Select it from the agent picker in the Chat view for multi-domain NinjaOne questions.
 
 ---
 
@@ -124,6 +131,7 @@ Use the ninjaone-expert agent
 ```
 
 Example questions well-suited to the expert agent:
+
 - "Write a script that reads a Dropdown field and generates a WYSIWYG status report"
 - "What environment variables does NinjaOne inject, and how do I use the node ID in an API call?"
 - "How do I handle a secure field safely in an automation script?"

@@ -1,6 +1,6 @@
 ---
 name: ninjaone-custom-fields
-description: Use when code uses Get-NinjaProperty or Set-NinjaProperty with -Type parameter, references NinjaOne custom field types (Dropdown, MultiSelect, WYSIWYG, Secure, etc.), or user asks about reading/writing NinjaOne custom fields with type conversion.
+description: Using the NinjaOne PowerShell module (Get-NinjaProperty, Set-NinjaProperty) to access and manage custom fields with automatic type conversion. Use when scripts need to read or write device custom fields, documentation fields, dropdown values (with friendly names not GUIDs), checkboxes, dates, secure fields, multi-select options, or WYSIWYG reports. Handles 20+ field types including attachments, device/organization dropdowns, and documentation templates.
 ---
 
 # NinjaOne Custom Fields
