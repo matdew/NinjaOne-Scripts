@@ -32,8 +32,15 @@
         update failure or feature-update attempt is detected)
 
 .PARAMETER FailureLookbackDays
-    Days of Windows Update event history to scan. Defaults to the failureLookbackDays
-    environment variable, then to 14.
+    Days of Windows Update event history (and CBS/DISM/WindowsUpdate log history) to scan. Defaults
+    to the failureLookbackDays environment variable, then to 30. A wider window than the failure
+    events alone need, so log analysis can see a long-recurring servicing failure's first occurrence.
+
+.PARAMETER LogTailMB
+    How many megabytes from the end of each servicing log (CBS.log, DISM.log, decoded
+    WindowsUpdate.log) to read during log analysis. Defaults to the logTailMB environment variable,
+    then to 4. Range 1-64. Raise it when a long-running investigation pushed the relevant session
+    further back in a busy log.
 
 .PARAMETER SkipSetupDiag
     Skip SetupDiag entirely, including reading Windows Setup's own results. Guarantees the run
@@ -53,8 +60,10 @@
 
 .NOTES
     NinjaOne Script Variables (optional; define in the NinjaOne platform):
-      - Failure Lookback Days (Integer): Days of Windows Update event history to scan. Default 14.
-        Env var: failureLookbackDays
+      - Failure Lookback Days (Integer): Days of Windows Update event and CBS/DISM log history to
+        scan. Default 30. Env var: failureLookbackDays
+      - Log Tail MB (Integer): Megabytes to read from the end of each servicing log during log
+        analysis. Default 4, range 1-64. Env var: logTailMB
       - Detailed (Checkbox): Also print the full per-check report. Default off. Env var: detailed
       - Log Analysis (Dropdown: Auto/Skip/Force): Controls CBS/DISM/WindowsUpdate log analysis.
         Auto (default) runs it only on detected failures; Skip disables it; Force always runs it.
@@ -86,6 +95,9 @@
 param(
     [ValidateRange(1, 365)]
     [int]$FailureLookbackDays,
+
+    [ValidateRange(1, 64)]
+    [int]$LogTailMB,
 
     [switch]$SkipSetupDiag,
 
@@ -488,7 +500,7 @@ function Get-LogTail {
     # Read only the tail of a possibly-large log (CBS.log is held open by TrustedInstaller) with ReadWrite share.
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [int]$MaxBytes = 1048576
+        [int]$MaxBytes = 4194304
     )
 
     $lines = @()
@@ -507,24 +519,26 @@ function Get-LogTail {
 }
 
 function Select-UpdateLogLines {
-    # Keep in-window error/warning lines. CBS/DISM stamp 'yyyy-MM-dd HH:mm:ss'; decoded WU uses 'yyyy/MM/dd'.
+    # Keep in-window error/warning lines, each paired with its parsed timestamp (null when unparseable).
+    # CBS/DISM stamp 'yyyy-MM-dd HH:mm:ss'; decoded WU uses 'yyyy/MM/dd'.
     param(
         [string[]]$Lines,
         [datetime]$Cutoff
     )
 
-    $out = New-Object System.Collections.Generic.List[string]
+    $out = New-Object System.Collections.Generic.List[object]
     foreach ($line in $Lines) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $ts = $null
         if ($line -match '^\s*(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}):(\d{2}):(\d{2})') {
             try {
                 $ts = Get-Date -Year ([int]$Matches[1]) -Month ([int]$Matches[2]) -Day ([int]$Matches[3]) `
                     -Hour ([int]$Matches[4]) -Minute ([int]$Matches[5]) -Second ([int]$Matches[6])
                 if ($ts -lt $Cutoff) { continue }
-            } catch { Write-Verbose ('Ignored: ' + $_.Exception.Message) }
+            } catch { $ts = $null; Write-Verbose ('Ignored: ' + $_.Exception.Message) }
         }
         if ($line -match '(?i)(,\s*error\b|,\s*warning\b|\bfailed\b|\bwarning:|\b0x[0-9a-f]{8}\b|\berror\b)') {
-            [void]$out.Add($line)
+            [void]$out.Add([PSCustomObject]@{ Line = $line; Timestamp = $ts })
         }
     }
     return $out
@@ -534,12 +548,101 @@ function Select-UpdateLogLines {
 # Hex codes allow an optional 0x so DISM 'HRESULT=800F0900' forms match too (matching is case-insensitive).
 $script:LogMarkerMap = @(
     [PSCustomObject]@{ Cause = 'Disk space'; Severity = 'Critical'; Pattern = '(?:0x)?80070070|not enough space|insufficient.*(disk|space)|ERROR_DISK_FULL|disk.*full'; Recommendation = 'Free disk space on the system drive / system partition (see the Disk section above), then retry.' }
+    [PSCustomObject]@{ Cause = 'Missing sub-package manifest (UUP)'; Severity = 'Critical'; Pattern = '(?i)could not find missing package manifest/?cat for package|manifest of corrupted package:.*not found|after uup download,? some manifests are still missing|failed to collect corrupted payload'; Recommendation = 'WU''s online (UUP) repair ran but still cannot supply a needed sub-package manifest. Copy the named .mum/.cat from C:\Windows\Servicing\Packages on a known-good device at the identical build/patch level (icacls /save -> takeown -> replace -> icacls /restore to preserve the TrustedInstaller ACL), then re-run DISM /RestoreHealth.' }
     [PSCustomObject]@{ Cause = 'Component store corruption'; Severity = 'Critical'; Pattern = '(?:0x)?800f0900|(?:0x)?80073712|(?:0x)?80073701|(?:0x)?800f0831|(?:0x)?80070490|CBS_E_XML_PARSER_FAILURE|STORE_CORRUPT|corrupt'; Recommendation = 'Run DISM /Online /Cleanup-Image /RestoreHealth then SFC /scannow. If RestoreHealth cannot self-repair, supply a matching-build source (DISM /RestoreHealth /Source:WIM:<path> /LimitAccess).' }
     [PSCustomObject]@{ Cause = 'Missing source/payload files'; Severity = 'Critical'; Pattern = '(?:0x)?800f081f|(?:0x)?800f0906|(?:0x)?800f0907|source files could not be found|cannot find the (file|source)'; Recommendation = 'Supply a known-good source with DISM /RestoreHealth /Source:.' }
     [PSCustomObject]@{ Cause = 'Access denied / file in use'; Severity = 'Warning'; Pattern = '(?:0x)?80070005|(?:0x)?80070020|access is denied|being used by another process|sharing violation'; Recommendation = 'Reboot to release locked files, or pause antivirus/backup agents, then retry.' }
     [PSCustomObject]@{ Cause = 'Network / proxy / download'; Severity = 'Warning'; Pattern = '(?:0x)?80072ee[27]|(?:0x)?80072efd|(?:0x)?8024402c|(?:0x)?80244022|name not resolved|could not (connect|be resolved)'; Recommendation = 'Check connectivity, proxy, and TLS (see the Connectivity sections above), then retry.' }
     [PSCustomObject]@{ Cause = 'Servicing stack / pending operations'; Severity = 'Warning'; Pattern = '(?:0x)?80242017|pending\.xml|poqexec|reboot required|servicing stack'; Recommendation = 'Install the latest servicing stack update (SSU) and complete any pending reboot, then retry.' }
 )
+
+function Get-NamedPackages {
+    # Pull the specific package/manifest names CBS blames (parent Package_for_, numbered sub-packages,
+    # .mum/.cat manifests, and the 'package:<name>' phrasing) so a finding can name the failing component.
+    param([string[]]$Lines)
+
+    $packages = New-Object System.Collections.Generic.List[string]
+    $patterns = @(
+        '(?i)Package(?:_\d+)?_for_[^\s,";]+',
+        '(?i)[^\s,";\\/]+\.(?:mum|cat)',
+        '(?i)(?:corrupted\s+)?package:\s*([^\s,";]+)'
+    )
+    foreach ($line in $Lines) {
+        $text = [string]$line
+        foreach ($pattern in $patterns) {
+            foreach ($m in [regex]::Matches($text, $pattern)) {
+                $value = if ($m.Groups.Count -gt 1 -and $m.Groups[1].Success) { $m.Groups[1].Value } else { $m.Value }
+                $value = $value.TrimEnd('.', ',', ';', ')')
+                if (-not [string]::IsNullOrWhiteSpace($value) -and -not $packages.Contains($value)) { $packages.Add($value) }
+            }
+        }
+    }
+    return @($packages | Select-Object -First 5)
+}
+
+function Get-CauseRecurrence {
+    # First-seen/last-seen and a distinct-occurrence count for a cause group, grouping by exact timestamp
+    # (collapses CBS's many-lines-per-event logging). Lines with no parseable timestamp are excluded from
+    # the span; if none have one, the count falls back to the raw line count.
+    param([Parameter(Mandatory = $true)]$Group)
+
+    $stamps = @($Group | Where-Object { $_.Timestamp } | Select-Object -ExpandProperty Timestamp)
+    $distinct = @($stamps | Select-Object -Unique)
+
+    if ($distinct.Count -gt 0) {
+        $sorted = @($distinct | Sort-Object)
+        return [PSCustomObject]@{
+            Occurrences = $distinct.Count
+            FirstSeen   = $sorted[0]
+            LastSeen    = $sorted[-1]
+            SpanDays    = ($sorted[-1] - $sorted[0]).TotalDays
+        }
+    }
+
+    return [PSCustomObject]@{ Occurrences = @($Group).Count; FirstSeen = $null; LastSeen = $null; SpanDays = 0 }
+}
+
+function Get-LatestRepairOutcome {
+    # Most recent CBS/DISM repair-session finalize/outcome line across the raw tails, decoded to an HRESULT.
+    # Scans the unfiltered tail because a clean finalize (HRESULT=0x0) contains none of the error/warning
+    # keywords Select-UpdateLogLines filters on. Returns $null when no finalize line is found.
+    param([Parameter(Mandatory = $true)]$Sources)
+
+    $contextRx = '(?i)finalized|store corruption detect and repair|restorehealth|cleanup-image|processed the command line'
+    $hrRx = '(?i)HRESULT\s*=\s*0x([0-9a-f]+)'
+    $best = $null
+
+    foreach ($src in $Sources) {
+        foreach ($line in $src.Tail) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            if ($line -notmatch $contextRx) { continue }
+            $hr = [regex]::Match($line, $hrRx)
+            if (-not $hr.Success) { continue }
+
+            $ts = $null
+            if ($line -match '^\s*(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}):(\d{2}):(\d{2})') {
+                try {
+                    $ts = Get-Date -Year ([int]$Matches[1]) -Month ([int]$Matches[2]) -Day ([int]$Matches[3]) `
+                        -Hour ([int]$Matches[4]) -Minute ([int]$Matches[5]) -Second ([int]$Matches[6])
+                } catch { $ts = $null }
+            }
+            if ($null -eq $ts) { continue }
+
+            if ($null -eq $best -or $ts -gt $best.Timestamp) {
+                $code = 0
+                try { $code = [Convert]::ToUInt32($hr.Groups[1].Value, 16) } catch { continue }
+                $best = [PSCustomObject]@{
+                    Timestamp = $ts
+                    Code      = ('0x{0:X8}' -f $code)
+                    Log       = $src.Name
+                    Line      = $line.Trim()
+                }
+            }
+        }
+    }
+
+    return $best
+}
 
 #endregion Helpers
 
@@ -2027,10 +2130,12 @@ function Invoke-SetupDiag {
 }
 
 function Invoke-UpdateLogAnalysis {
-    # Classifies recent CBS/DISM/WindowsUpdate log errors into a probable cause. Gated on real evidence
-    # because decoding WindowsUpdate.log is expensive and writes a temp file.
+    # Classifies recent CBS/DISM/WindowsUpdate log errors into probable causes (up to the top 3, each
+    # with recurrence span and named packages) plus the most recent repair-session outcome. Gated on
+    # real evidence because decoding WindowsUpdate.log is expensive and writes a temp file.
     param(
-        [int]$LookbackDays = 14,
+        [int]$LookbackDays = 30,
+        [int]$LogTailMB = 4,
         [bool]$Force = $false
     )
 
@@ -2054,6 +2159,7 @@ function Invoke-UpdateLogAnalysis {
 
     $cutoff = (Get-Date).AddDays(-$LookbackDays)
     $hits = New-Object System.Collections.Generic.List[object]
+    $rawTails = New-Object System.Collections.Generic.List[object]
     $anyLogRead = $false
 
     $sources = New-Object System.Collections.Generic.List[object]
@@ -2101,18 +2207,21 @@ function Invoke-UpdateLogAnalysis {
             $anyLogRead = $true
             $lastWrite = ''
             try { $lastWrite = (Get-Item -LiteralPath $src.Path -ErrorAction Stop).LastWriteTime } catch { Write-Verbose ('Ignored: ' + $_.Exception.Message) }
-            $errLines = @(Select-UpdateLogLines -Lines (Get-LogTail -Path $src.Path) -Cutoff $cutoff)
+            $rawTail = Get-LogTail -Path $src.Path -MaxBytes ($LogTailMB * 1MB)
+            $rawTails.Add([PSCustomObject]@{ Name = $src.Name; Tail = $rawTail })
+            $errLines = @(Select-UpdateLogLines -Lines $rawTail -Cutoff $cutoff)
             Write-Report ('{0}: {1} recent error/warning line(s) in the last {2} days (last write {3}).' -f $src.Name, $errLines.Count, $LookbackDays, $lastWrite)
 
-            foreach ($line in $errLines) {
+            foreach ($entry in $errLines) {
+                $text = ([string]$entry.Line).Trim()
                 $rule = $null
                 foreach ($candidate in $script:LogMarkerMap) {
-                    if ($line -match $candidate.Pattern) { $rule = $candidate; break }
+                    if ($text -match $candidate.Pattern) { $rule = $candidate; break }
                 }
                 if ($rule) {
-                    $hits.Add([PSCustomObject]@{ Cause = $rule.Cause; Severity = $rule.Severity; Recommendation = $rule.Recommendation; Log = $src.Name; Line = $line.Trim() })
+                    $hits.Add([PSCustomObject]@{ Cause = $rule.Cause; Severity = $rule.Severity; Recommendation = $rule.Recommendation; Log = $src.Name; Line = $text; Timestamp = $entry.Timestamp })
                 } else {
-                    $hits.Add([PSCustomObject]@{ Cause = 'Other'; Severity = 'Warning'; Recommendation = ''; Log = $src.Name; Line = $line.Trim() })
+                    $hits.Add([PSCustomObject]@{ Cause = 'Other'; Severity = 'Warning'; Recommendation = ''; Log = $src.Name; Line = $text; Timestamp = $entry.Timestamp })
                 }
             }
         }
@@ -2126,42 +2235,63 @@ function Invoke-UpdateLogAnalysis {
         return
     }
 
+    # Most-recent repair-session outcome prints first; it is decoded consistently with the rest of the
+    # script and is the honest "what happened last time" signal that aggregated history can bury.
+    $outcome = Get-LatestRepairOutcome -Sources $rawTails
+    if ($outcome) {
+        $when = $outcome.Timestamp.ToString('yyyy-MM-dd HH:mm')
+        Write-Report ''
+        if ($outcome.Code -eq '0x00000000') {
+            Write-Report ('Last repair-session outcome ({0}, {1}): success (HRESULT 0x0 / S_OK).' -f $outcome.Log, $when)
+            Add-Finding -Category 'Log Analysis' -Severity 'OK' `
+                -Detail ('The most recent CBS/DISM repair session finalized successfully (HRESULT 0x0 / S_OK) on {0} ({1}).' -f $when, $outcome.Log)
+        } else {
+            $oInfo = Get-WuErrorInfo -ErrorCode $outcome.Code
+            Write-Report ('Last repair-session outcome ({0}, {1}): {2} - {3}' -f $outcome.Log, $when, $outcome.Code, $oInfo.Text)
+            Add-Finding -Category 'Log Analysis' -Severity $oInfo.Severity `
+                -Detail ('The most recent CBS/DISM repair session ({0}, {1}) finalized with {2}: {3}' -f $outcome.Log, $when, $outcome.Code, $oInfo.Text) `
+                -Recommendation $oInfo.Fix
+        }
+    }
+
     if ($hits.Count -eq 0) {
         Write-Report 'No error or warning lines found in the servicing logs within the lookback window.'
         Add-Finding -Category 'Log Analysis' -Severity 'OK' -Detail 'Servicing logs (CBS/DISM/WindowsUpdate) showed no recent errors in the lookback window.'
         return
     }
 
-    # Rank known causes by severity, then by how often they appear.
+    # Rank known causes by severity, then by how often they appear; report the top 3 as separate findings.
     $rank = @{ 'OK' = 0; 'Info' = 1; 'Warning' = 2; 'Critical' = 3 }
     $known = @($hits | Where-Object { $_.Cause -ne 'Other' })
     $groups = @($known | Group-Object Cause | Sort-Object @{ Expression = { $rank[$_.Group[0].Severity] } }, Count -Descending)
 
     if ($groups.Count -gt 0) {
-        $top = $groups[0]
-        $samples = @($top.Group | Select-Object -ExpandProperty Line -Unique | Select-Object -First 5)
-        Write-Report ''
-        Write-Report "Probable cause: $($top.Name) ($($top.Count) matching line(s))."
-        foreach ($s in $samples) { Write-Report "    $s" }
+        $topGroups = @($groups | Select-Object -First 3)
+        $others = @($groups | Select-Object -Skip 3 | ForEach-Object { "$($_.Name) ($($_.Count))" })
 
-        # The specific package/manifest named in the lines is the actionable detail (e.g. a corrupt .mum).
-        $packages = New-Object System.Collections.Generic.List[string]
-        foreach ($l in $top.Group.Line) {
-            foreach ($m in [regex]::Matches([string]$l, '(?i)Package_for_[^\s,";]+|[^\s,";\\/]+\.mum')) {
-                if (-not $packages.Contains($m.Value)) { $packages.Add($m.Value) }
+        for ($i = 0; $i -lt $topGroups.Count; $i++) {
+            $group = $topGroups[$i]
+            $stats = Get-CauseRecurrence -Group $group.Group
+            $samples = @($group.Group | Select-Object -ExpandProperty Line -Unique | Select-Object -First 5)
+            $namedPackages = @(Get-NamedPackages -Lines $group.Group.Line)
+
+            $span = ''
+            if ($stats.FirstSeen) {
+                $span = " between $($stats.FirstSeen.ToString('yyyy-MM-dd')) and $($stats.LastSeen.ToString('yyyy-MM-dd'))"
+                if ($stats.SpanDays -ge 1) { $span += (', recurring over {0:N0} day(s)' -f $stats.SpanDays) }
             }
-        }
-        $namedPackages = @($packages | Select-Object -First 5)
-        if ($namedPackages.Count -gt 0) {
-            Write-Report ('Named package(s)/manifest(s): ' + ($namedPackages -join ', '))
-        }
 
-        $detail = "Servicing logs point to: $($top.Name) ($($top.Count) matching log line(s))."
-        if ($namedPackages.Count -gt 0) { $detail += ' Named component(s): ' + ($namedPackages -join ', ') + '.' }
-        $others = @($groups | Select-Object -Skip 1 | ForEach-Object { "$($_.Name) ($($_.Count))" })
-        if ($others.Count -gt 0) { $detail += ' Also seen: ' + ($others -join ', ') + '.' }
+            Write-Report ''
+            Write-Report ('Probable cause: {0} ({1} occurrence(s){2}).' -f $group.Name, $stats.Occurrences, $span)
+            foreach ($s in $samples) { Write-Report "    $s" }
+            if ($namedPackages.Count -gt 0) { Write-Report ('Named package(s)/manifest(s): ' + ($namedPackages -join ', ')) }
 
-        Add-Finding -Category 'Log Analysis' -Severity $top.Group[0].Severity -Detail $detail -Recommendation $top.Group[0].Recommendation
+            $detail = "Servicing logs point to: $($group.Name) ($($stats.Occurrences) occurrence(s)$span)."
+            if ($namedPackages.Count -gt 0) { $detail += ' Named component(s): ' + ($namedPackages -join ', ') + '.' }
+            if ($i -eq ($topGroups.Count - 1) -and $others.Count -gt 0) { $detail += ' Also seen: ' + ($others -join ', ') + '.' }
+
+            Add-Finding -Category 'Log Analysis' -Severity $group.Group[0].Severity -Detail $detail -Recommendation $group.Group[0].Recommendation
+        }
     } else {
         $samples = @($hits | Select-Object -ExpandProperty Line -Unique | Select-Object -First 5)
         Write-Report ''
@@ -2183,9 +2313,16 @@ try {
     # Explicit -FailureLookbackDays wins; else the NinjaOne script variable; else the default.
     $lookbackDays = $FailureLookbackDays
     if (-not $PSBoundParameters.ContainsKey('FailureLookbackDays')) {
-        $lookbackDays = Get-ScriptVarInt -Name 'failureLookbackDays' -Default 14
+        $lookbackDays = Get-ScriptVarInt -Name 'failureLookbackDays' -Default 30
     }
-    if ($lookbackDays -lt 1) { $lookbackDays = 14 }
+    if ($lookbackDays -lt 1) { $lookbackDays = 30 }
+
+    # Explicit -LogTailMB wins; else the NinjaOne script variable; else 4 MB. Clamp to the 1-64 range.
+    $logTailMB = $LogTailMB
+    if (-not $PSBoundParameters.ContainsKey('LogTailMB')) {
+        $logTailMB = Get-ScriptVarInt -Name 'logTailMB' -Default 4
+    }
+    if ($logTailMB -lt 1) { $logTailMB = 4 } elseif ($logTailMB -gt 64) { $logTailMB = 64 }
 
     # Explicit -Detailed wins; else the NinjaOne script variable; else off.
     if ($PSBoundParameters.ContainsKey('Detailed')) {
@@ -2243,7 +2380,7 @@ try {
         Write-Section -Title 'Update Log Analysis'
         Write-Report 'Skipped by Log Analysis = Skip. No logs were read or decoded.'
     } else {
-        Invoke-UpdateLogAnalysis -LookbackDays $lookbackDays -Force ($logAnalysisMode -eq 'Force')
+        Invoke-UpdateLogAnalysis -LookbackDays $lookbackDays -LogTailMB $logTailMB -Force ($logAnalysisMode -eq 'Force')
     }
 
     if ($SkipSetupDiag) {
