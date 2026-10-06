@@ -2318,11 +2318,13 @@ try {
     if ($lookbackDays -lt 1) { $lookbackDays = 30 }
 
     # Explicit -LogTailMB wins; else the NinjaOne script variable; else 4 MB. Clamp to the 1-64 range.
-    $logTailMB = $LogTailMB
+    # Local name differs from the $LogTailMB param: PowerShell vars are case-insensitive, so reusing the
+    # name would re-trigger the param's ValidateRange(1,64) and reject the unbound default of 0.
+    $logTailSizeMB = $LogTailMB
     if (-not $PSBoundParameters.ContainsKey('LogTailMB')) {
-        $logTailMB = Get-ScriptVarInt -Name 'logTailMB' -Default 4
+        $logTailSizeMB = Get-ScriptVarInt -Name 'logTailMB' -Default 4
     }
-    if ($logTailMB -lt 1) { $logTailMB = 4 } elseif ($logTailMB -gt 64) { $logTailMB = 64 }
+    if ($logTailSizeMB -lt 1) { $logTailSizeMB = 4 } elseif ($logTailSizeMB -gt 64) { $logTailSizeMB = 64 }
 
     # Explicit -Detailed wins; else the NinjaOne script variable; else off.
     if ($PSBoundParameters.ContainsKey('Detailed')) {
@@ -2380,7 +2382,7 @@ try {
         Write-Section -Title 'Update Log Analysis'
         Write-Report 'Skipped by Log Analysis = Skip. No logs were read or decoded.'
     } else {
-        Invoke-UpdateLogAnalysis -LookbackDays $lookbackDays -LogTailMB $logTailMB -Force ($logAnalysisMode -eq 'Force')
+        Invoke-UpdateLogAnalysis -LookbackDays $lookbackDays -LogTailMB $logTailSizeMB -Force ($logAnalysisMode -eq 'Force')
     }
 
     if ($SkipSetupDiag) {
