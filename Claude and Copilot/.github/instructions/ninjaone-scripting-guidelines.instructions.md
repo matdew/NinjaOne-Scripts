@@ -190,6 +190,26 @@ try {
 }
 ```
 
+## Comments
+
+Write a comment only to capture what the code cannot show on its own — a non-obvious
+"why", a gotcha, a workaround, or a reference. Keep it to one short line.
+
+- Don't restate what the next line does, narrate the change, or address the reviewer.
+- Don't add comments or help blocks to code you didn't change.
+- Don't write a multi-paragraph comment where a single line will do.
+- Prefer a self-documenting name over a comment that explains a poorly-named thing.
+- Delete stale comments instead of leaving prose that no longer matches the code.
+- Comment-based help (`.SYNOPSIS`/`.DESCRIPTION`/`.NOTES`) is the exception — keep it
+  complete for scripts and public functions; the one-line rule is for inline comments.
+
+```powershell
+# Good: netsh output is localized; the registry blob is the language-independent source
+# Good: SetupDiag requires .NET 4.7.2+ (release 461808)
+# Bad:  Loop over each service and check its state
+# Bad:  Changed this to fix the bug where it crashed
+```
+
 ## Best Practices Summary
 
 1. **Validate mandatory script variables** - Check for null or empty values and fail fast with a clear error message
