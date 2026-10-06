@@ -22,7 +22,7 @@
       - Recent Windows Update failure events with plain-English error-code diagnosis
       - Disk space (system drive and system/EFI partition) and SoftwareDistribution sizes
       - Windows Update source / WSUS / Group Policy and MDM (Intune) policy configuration
-      - OS end-of-servicing status
+      - OS end-of-servicing status (including Windows 10 ESU coverage when an ESU license is installed)
       - Internet update-endpoint connectivity (DNS + TCP 443 + TLS interception) when not
         WSUS-managed
       - Date/time skew, TLS 1.2 availability, and proxy configuration
@@ -1412,6 +1412,34 @@ function Write-ServicingFinding {
     }
 }
 
+# Windows 10 Extended Security Updates (ESU) SKUs -> coverage end date (consumer/commercial ESU for 22H2).
+# Installed ESU shows as an active SoftwareLicensingProduct keyed by these SKU GUIDs. REVIEW PERIODICALLY -
+# snapshot compiled 2026-10. https://learn.microsoft.com/windows/whats-new/extended-security-updates
+$script:Win10EsuInfo = @(
+    [PSCustomObject]@{ Duration = 'Year 1'; Id = 'f520e45e-7413-4a34-a497-d2765967d094'; EoL = [datetime]'2026-10-13' }
+    [PSCustomObject]@{ Duration = 'Year 2'; Id = '1043add5-23b1-4afb-9a0f-64343c8f3f8d'; EoL = [datetime]'2027-10-12' }
+    [PSCustomObject]@{ Duration = 'Year 3'; Id = '83d49986-add3-41d7-ba33-87c7bfb5c0fb'; EoL = [datetime]'2028-10-10' }
+)
+
+function Get-Win10EsuCoverage {
+    # The active ESU license with the latest coverage end date, or $null if none is installed.
+    $best = $null
+    try {
+        $licenses = Get-CimInstance -ClassName SoftwareLicensingProduct -ErrorAction Stop |
+            Where-Object { $_.LicenseStatus -eq 1 -and $_.Name -like 'Windows*' }
+        foreach ($license in $licenses) {
+            foreach ($esu in $script:Win10EsuInfo) {
+                if ($esu.Id -eq [string]$license.ID -and ($null -eq $best -or $esu.EoL -gt $best.EoL)) {
+                    $best = $esu
+                }
+            }
+        }
+    } catch {
+        Write-Verbose ('Ignored: ' + $_.Exception.Message)
+    }
+    return $best
+}
+
 function Test-OsServicingStatus {
     # A client past end-of-servicing receives nothing while every other check looks clean.
     Write-Section -Title 'OS Servicing Status'
@@ -1473,6 +1501,7 @@ function Test-OsServicingStatus {
         $releaseName = $ltsc.Name
         $edition = if ($isIot) { 'IoT Enterprise LTSC' } else { 'Enterprise LTSC/LTSB' }
         $eos = if ($isIot) { [datetime]$ltsc.IoT } else { [datetime]$ltsc.NonIoT }
+        $checkEsu = $false   # LTSC has its own extended lifecycle; the ESU SKUs do not apply.
     } else {
         $entry = $script:OsServicingTable[$build]
         if (-not $entry) {
@@ -1490,10 +1519,27 @@ function Test-OsServicingStatus {
         $releaseName = $entry.Name
         $edition = if ($isEnterprise) { 'Enterprise/Education' } else { 'Home/Pro' }
         $eos = if ($isEnterprise) { [datetime]$entry.Enterprise } else { [datetime]$entry.Broad }
+        $checkEsu = ($entry.Name -like 'Windows 10*')
     }
 
     Write-Report "Release       : $releaseName (build $build)"
     Write-Report "Servicing lane: $edition"
+
+    # Windows 10 ESU can extend coverage past the base end-of-servicing date.
+    if ($checkEsu) {
+        $esu = Get-Win10EsuCoverage
+        if ($esu) {
+            Write-Report "ESU coverage  : $($esu.Duration) license active (through $($esu.EoL.ToString('yyyy-MM-dd')))"
+            if ($esu.EoL -gt $eos) {
+                Write-ServicingFinding -ReleaseName $releaseName -Edition "$edition with ESU ($($esu.Duration))" -Eos $esu.EoL `
+                    -EolNote 'Coverage is provided by an installed Windows 10 Extended Security Updates (ESU) license.'
+                return
+            }
+        } else {
+            Write-Report 'ESU coverage  : no active Windows 10 ESU license installed.'
+        }
+    }
+
     Write-ServicingFinding -ReleaseName $releaseName -Edition $edition -Eos $eos
 }
 
