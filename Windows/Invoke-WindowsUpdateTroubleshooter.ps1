@@ -7,11 +7,12 @@
     sectioned report followed by an issue summary and recommended actions. Intended to explain
     WHY Windows Update is failing or stalled.
 
-    All diagnostic checks are read-only. The one exception is the optional SetupDiag analysis:
-    when (and only when) there is evidence of a recent feature-update attempt, the script may
-    download Microsoft's SetupDiag.exe to %SystemRoot%\Temp\SetupDiag, verify its Authenticode
-    signature, run it, and then delete it. Pass -SkipSetupDiag to make the run strictly
-    read-only.
+    Most diagnostic checks are read-only. Two checks touch the disk: the optional SetupDiag analysis
+    (when there is evidence of a recent feature-update attempt, the script may download Microsoft's
+    SetupDiag.exe to %SystemRoot%\Temp\SetupDiag, verify its Authenticode signature, run it, then
+    delete it), and the update log analysis (which decodes WindowsUpdate.log to a temporary file,
+    parses it, then deletes it). Pass -SkipSetupDiag and set Log Analysis to Skip to make the run
+    strictly read-only.
 
     Checks performed:
       - Windows Update service health and start mode (wuauserv, BITS, CryptSvc, TrustedInstaller,
@@ -27,6 +28,8 @@
       - Date/time skew, TLS 1.2 availability, and proxy configuration
       - BITS transfer job state and SoftwareDistribution datastore heuristics
       - SetupDiag feature-update failure analysis (when a recent attempt is detected)
+      - CBS / DISM / WindowsUpdate log analysis with probable-cause classification (when a recent
+        update failure or feature-update attempt is detected)
 
 .PARAMETER FailureLookbackDays
     Days of Windows Update event history to scan. Defaults to the failureLookbackDays
@@ -35,6 +38,11 @@
 .PARAMETER SkipSetupDiag
     Skip SetupDiag entirely, including reading Windows Setup's own results. Guarantees the run
     makes no changes to the device.
+
+.PARAMETER LogAnalysis
+    Controls the CBS/DISM/WindowsUpdate log analysis. Auto (default) runs it only when a recent
+    update failure or feature-update attempt is detected; Skip disables it entirely (no
+    WindowsUpdate.log decode, so the run makes no changes for this check); Force always runs it.
 
 .PARAMETER AsObject
     Emit the finding objects to the pipeline instead of only printing the text report.
@@ -48,6 +56,9 @@
       - Failure Lookback Days (Integer): Days of Windows Update event history to scan. Default 14.
         Env var: failureLookbackDays
       - Detailed (Checkbox): Also print the full per-check report. Default off. Env var: detailed
+      - Log Analysis (Dropdown: Auto/Skip/Force): Controls CBS/DISM/WindowsUpdate log analysis.
+        Auto (default) runs it only on detected failures; Skip disables it; Force always runs it.
+        Env var: logAnalysis
 
     SetupDiag is only downloaded and run when there is evidence of a recent feature-update
     attempt (recent Panther setup logs, a rollback marker, or a feature-update failure event).
@@ -78,18 +89,22 @@ param(
 
     [switch]$SkipSetupDiag,
 
+    [ValidateSet('Auto', 'Skip', 'Force')]
+    [string]$LogAnalysis,
+
     [switch]$AsObject,
 
     [switch]$Detailed
 )
 
-# Best-effort: allow this session's own web requests to negotiate TLS 1.2 (does not change the system).
+# Let this session's web requests negotiate TLS 1.2; does not change the system.
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 } catch { Write-Verbose ('Ignored: ' + $_.Exception.Message) }
 
 $script:Findings = New-Object System.Collections.Generic.List[object]
 $script:WsusServer = ''
+$script:UpdateFailuresDetected = $false
 
 # Under -AsObject the report text goes to Write-Host so findings are the only pipeline output.
 $script:EmitObjects = [bool]$AsObject
@@ -401,6 +416,16 @@ $script:WuErrorMap = @{
     '0X80244023' = @{ Severity = 'Warning'; Text = 'HTTP 504 - gateway timeout reaching the update server (0x80244023).'; Fix = 'Check the proxy/gateway and network latency, then retry.' }
 }
 
+# CBS/servicing-stack error codes (facility 0x0F) that do not appear in the Windows Update error reference
+# and only surface decoded in CBS.log / DISM.log. https://learn.microsoft.com/windows/deployment/
+$script:CbsErrorMap = @{
+    '0X800F0900' = @{ Severity = 'Critical'; Text = 'CBS internal XML parser failure - component store manifests are corrupted (0x800F0900, CBS_E_XML_PARSER_FAILURE).'; Fix = 'Run DISM /Online /Cleanup-Image /RestoreHealth then SFC /scannow; if DISM cannot self-repair, supply a matching source with /Source.' }
+    '0X80073712' = @{ Severity = 'Critical'; Text = 'A component store file or manifest is missing or corrupted (0x80073712, ERROR_SXS_COMPONENT_STORE_CORRUPT).'; Fix = 'Run DISM /RestoreHealth then SFC /scannow.' }
+    '0X800F0906' = @{ Severity = 'Warning'; Text = 'CBS could not download the source files needed for servicing (0x800F0906, CBS_E_DOWNLOAD_FAILURE).'; Fix = 'Check connectivity/WSUS/source, or run DISM /RestoreHealth /Source: with a known-good image.' }
+    '0X800F0907' = @{ Severity = 'Warning'; Text = 'Servicing could not obtain repair files and policy blocked Windows Update as a source (0x800F0907).'; Fix = 'Provide a source with DISM /RestoreHealth /Source:<path> /LimitAccess, or allow Windows Update as a repair source.' }
+    '0X800F0805' = @{ Severity = 'Info'; Text = 'A package could not be opened or was invalid (0x800F0805, CBS_E_INVALID_PACKAGE); usually a transient Windows Update package-open failure.'; Fix = 'Usually benign if it does not recur - re-run the scan/servicing. Investigate only if it persists.' }
+}
+
 function Get-WuErrorInfo {
     # Normalized {Severity,Text,Fix} for a WU error code; unknown codes fall back to Warning.
     param([AllowNull()][string]$ErrorCode)
@@ -414,6 +439,7 @@ function Get-WuErrorInfo {
     }
 
     $entry = $script:WuErrorMap[$ErrorCode.ToUpper()]
+    if (-not $entry) { $entry = $script:CbsErrorMap[$ErrorCode.ToUpper()] }
     if ($entry) {
         return [PSCustomObject]@{
             Severity = $entry.Severity
@@ -457,6 +483,63 @@ function Get-WuEventErrorCode {
 
     return ''
 }
+
+function Get-LogTail {
+    # Read only the tail of a possibly-large log (CBS.log is held open by TrustedInstaller) with ReadWrite share.
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [int]$MaxBytes = 1048576
+    )
+
+    $lines = @()
+    try {
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            if ($fs.Length -gt $MaxBytes) { [void]$fs.Seek(-$MaxBytes, [System.IO.SeekOrigin]::End) }
+            $sr = New-Object System.IO.StreamReader($fs)
+            try { $content = $sr.ReadToEnd() } finally { $sr.Dispose() }
+            $lines = $content -split "`r?`n"
+        } finally { $fs.Dispose() }
+    } catch {
+        Write-Verbose ('Get-LogTail failed for ' + $Path + ': ' + $_.Exception.Message)
+    }
+    return $lines
+}
+
+function Select-UpdateLogLines {
+    # Keep in-window error/warning lines. CBS/DISM stamp 'yyyy-MM-dd HH:mm:ss'; decoded WU uses 'yyyy/MM/dd'.
+    param(
+        [string[]]$Lines,
+        [datetime]$Cutoff
+    )
+
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($line in $Lines) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        if ($line -match '^\s*(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}):(\d{2}):(\d{2})') {
+            try {
+                $ts = Get-Date -Year ([int]$Matches[1]) -Month ([int]$Matches[2]) -Day ([int]$Matches[3]) `
+                    -Hour ([int]$Matches[4]) -Minute ([int]$Matches[5]) -Second ([int]$Matches[6])
+                if ($ts -lt $Cutoff) { continue }
+            } catch { Write-Verbose ('Ignored: ' + $_.Exception.Message) }
+        }
+        if ($line -match '(?i)(,\s*error\b|,\s*warning\b|\bfailed\b|\bwarning:|\b0x[0-9a-f]{8}\b|\berror\b)') {
+            [void]$out.Add($line)
+        }
+    }
+    return $out
+}
+
+# Ordered probable-cause rules for CBS/DISM/WindowsUpdate log lines; first match wins, most severe first.
+# Hex codes allow an optional 0x so DISM 'HRESULT=800F0900' forms match too (matching is case-insensitive).
+$script:LogMarkerMap = @(
+    [PSCustomObject]@{ Cause = 'Disk space'; Severity = 'Critical'; Pattern = '(?:0x)?80070070|not enough space|insufficient.*(disk|space)|ERROR_DISK_FULL|disk.*full'; Recommendation = 'Free disk space on the system drive / system partition (see the Disk section above), then retry.' }
+    [PSCustomObject]@{ Cause = 'Component store corruption'; Severity = 'Critical'; Pattern = '(?:0x)?800f0900|(?:0x)?80073712|(?:0x)?80073701|(?:0x)?800f0831|(?:0x)?80070490|CBS_E_XML_PARSER_FAILURE|STORE_CORRUPT|corrupt'; Recommendation = 'Run DISM /Online /Cleanup-Image /RestoreHealth then SFC /scannow. If RestoreHealth cannot self-repair, supply a matching-build source (DISM /RestoreHealth /Source:WIM:<path> /LimitAccess).' }
+    [PSCustomObject]@{ Cause = 'Missing source/payload files'; Severity = 'Critical'; Pattern = '(?:0x)?800f081f|(?:0x)?800f0906|(?:0x)?800f0907|source files could not be found|cannot find the (file|source)'; Recommendation = 'Supply a known-good source with DISM /RestoreHealth /Source:.' }
+    [PSCustomObject]@{ Cause = 'Access denied / file in use'; Severity = 'Warning'; Pattern = '(?:0x)?80070005|(?:0x)?80070020|access is denied|being used by another process|sharing violation'; Recommendation = 'Reboot to release locked files, or pause antivirus/backup agents, then retry.' }
+    [PSCustomObject]@{ Cause = 'Network / proxy / download'; Severity = 'Warning'; Pattern = '(?:0x)?80072ee[27]|(?:0x)?80072efd|(?:0x)?8024402c|(?:0x)?80244022|name not resolved|could not (connect|be resolved)'; Recommendation = 'Check connectivity, proxy, and TLS (see the Connectivity sections above), then retry.' }
+    [PSCustomObject]@{ Cause = 'Servicing stack / pending operations'; Severity = 'Warning'; Pattern = '(?:0x)?80242017|pending\.xml|poqexec|reboot required|servicing stack'; Recommendation = 'Install the latest servicing stack update (SSU) and complete any pending reboot, then retry.' }
+)
 
 #endregion Helpers
 
@@ -1257,7 +1340,7 @@ function Test-WuActivityRecency {
     }
 }
 
-# Windows client end-of-servicing by build. REVIEW PERIODICALLY - snapshot compiled 2026-09; servers excluded.
+# Windows client end-of-servicing by build. REVIEW PERIODICALLY - snapshot compiled 2026-10 (servers: see ServerServicingTable).
 $script:OsServicingTable = @{
     # Windows 10
     19041 = @{ Name = 'Windows 10 2004'; Broad = '2021-12-14'; Enterprise = '2021-12-14' }
@@ -1271,6 +1354,8 @@ $script:OsServicingTable = @{
     22631 = @{ Name = 'Windows 11 23H2'; Broad = '2025-11-11'; Enterprise = '2026-11-10' }
     26100 = @{ Name = 'Windows 11 24H2'; Broad = '2026-10-13'; Enterprise = '2027-10-12' }
     26200 = @{ Name = 'Windows 11 25H2'; Broad = '2027-10-12'; Enterprise = '2028-10-10' }
+    26300 = @{ Name = 'Windows 11 26H2'; Broad = '2028-10-10'; Enterprise = '2029-10-09' }
+    28000 = @{ Name = 'Windows 11 26H1'; Broad = '2028-03-14'; Enterprise = '2029-03-13' } # new-device-only release; higher build but shipped before 26H2
 }
 
 # LTSB/LTSC end-of-servicing by build. These editions share a build number with the equivalent GA
@@ -1285,6 +1370,48 @@ $script:LtscServicingTable = @{
     26100 = @{ Name = 'Windows 11 Enterprise LTSC 2024'; NonIoT = '2029-10-09'; IoT = '2034-10-10' }
 }
 
+# Windows Server end-of-servicing by build, keyed to the Extended support (security update) end date -
+# when a server stops receiving security updates. Editions share a lifecycle so one date applies.
+# Pre-2016 entries are already EOL and flag Critical. REVIEW PERIODICALLY - snapshot compiled 2026-10.
+# https://learn.microsoft.com/windows/release-health/windows-server-release-info
+$script:ServerServicingTable = @{
+    7601  = @{ Name = 'Windows Server 2008 R2'; Eos = '2020-01-14'; Note = 'Paid Extended Security Updates (ESU) may extend coverage beyond this date.' }
+    9200  = @{ Name = 'Windows Server 2012'; Eos = '2023-10-10'; Note = 'Paid Extended Security Updates (ESU) may extend coverage beyond this date.' }
+    9600  = @{ Name = 'Windows Server 2012 R2'; Eos = '2023-10-10'; Note = 'Paid Extended Security Updates (ESU) may extend coverage beyond this date.' }
+    14393 = @{ Name = 'Windows Server 2016'; Eos = '2027-01-12' }
+    17763 = @{ Name = 'Windows Server 2019'; Eos = '2029-01-09' }
+    20348 = @{ Name = 'Windows Server 2022'; Eos = '2031-10-14' }
+    26100 = @{ Name = 'Windows Server 2025'; Eos = '2034-11-14' }
+}
+
+function Write-ServicingFinding {
+    # Shared servicing verdict for client and server: Critical past EOS, Warning within 90 days, else OK.
+    param(
+        [Parameter(Mandatory = $true)][string]$ReleaseName,
+        [Parameter(Mandatory = $true)][string]$Edition,
+        [Parameter(Mandatory = $true)][datetime]$Eos,
+        [string]$EolNote = ''
+    )
+
+    Write-Report "End of service: $($Eos.ToString('yyyy-MM-dd'))"
+    $daysLeft = [int]($Eos - (Get-Date)).TotalDays
+
+    if ($daysLeft -lt 0) {
+        $detail = "$ReleaseName ($Edition) reached end of servicing on $($Eos.ToString('yyyy-MM-dd')), $([math]::Abs($daysLeft)) days ago. This device no longer receives quality updates, which explains an absence of updates even when everything else is healthy."
+        if (-not [string]::IsNullOrWhiteSpace($EolNote)) { $detail += " $EolNote" }
+        Add-Finding -Category 'Servicing' -Severity 'Critical' `
+            -Detail $detail `
+            -Recommendation 'Upgrade to a serviced Windows release (feature update or in-place upgrade).'
+    } elseif ($daysLeft -le 90) {
+        Add-Finding -Category 'Servicing' -Severity 'Warning' `
+            -Detail "$ReleaseName ($Edition) reaches end of servicing on $($Eos.ToString('yyyy-MM-dd')), in $daysLeft days." `
+            -Recommendation 'Plan the feature update before servicing ends.'
+    } else {
+        Add-Finding -Category 'Servicing' -Severity 'OK' `
+            -Detail "$ReleaseName ($Edition) is in servicing until $($Eos.ToString('yyyy-MM-dd')) ($daysLeft days remaining)."
+    }
+}
+
 function Test-OsServicingStatus {
     # A client past end-of-servicing receives nothing while every other check looks clean.
     Write-Section -Title 'OS Servicing Status'
@@ -1296,15 +1423,23 @@ function Test-OsServicingStatus {
         return
     }
 
-    if ([int]$os.ProductType -ne 1) {
-        Write-Report 'Server OS - end-of-servicing is not evaluated by this check.'
-        Add-Finding -Category 'Servicing' -Severity 'Info' `
-            -Detail 'Server OS: end-of-servicing follows the server lifecycle and was not evaluated.'
-        return
-    }
-
     $build = 0
     [void][int]::TryParse(([string]$os.BuildNumber), [ref]$build)
+
+    # Servers follow their own (longer) lifecycle; resolve against the server table by Extended support end.
+    if ([int]$os.ProductType -ne 1) {
+        $server = $script:ServerServicingTable[$build]
+        if (-not $server) {
+            Write-Report "Server build $build is not in the servicing table (newer than this script, or an unsupported build)."
+            Add-Finding -Category 'Servicing' -Severity 'Info' `
+                -Detail "Server OS build $build was not found in the script's end-of-servicing table; it may be newer than the table (compiled 2026-10)."
+            return
+        }
+        Write-Report "Release       : $($server.Name) (build $build)"
+        Write-Report 'Servicing lane: Server (Extended support / security updates)'
+        Write-ServicingFinding -ReleaseName $server.Name -Edition 'Server' -Eos ([datetime]$server.Eos) -EolNote ([string]$server.Note)
+        return
+    }
 
     # Use EditionID, not Caption (Caption can say "Business" on Pro and misclassify the servicing lane).
     $editionId = ''
@@ -1312,8 +1447,8 @@ function Test-OsServicingStatus {
         $editionId = [string](Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name EditionID -ErrorAction Stop).EditionID
     } catch { Write-Verbose ('Ignored: ' + $_.Exception.Message) }
 
-    # LTSB/LTSC editions carry an 'S' suffix (EnterpriseS, EnterpriseSN, IoTEnterpriseS) and have their
-    # own, much longer lifecycles that share a build number with the GA release, so resolve them first.
+    # LTSB/LTSC editions carry an 'S' suffix (EnterpriseS, EnterpriseSN, IoTEnterpriseS) and share a
+    # build number with the GA release but have much longer lifecycles, so resolve them first.
     if ($editionId) {
         $isLtsc = ($editionId -match 'EnterpriseS')
     } else {
@@ -1359,22 +1494,7 @@ function Test-OsServicingStatus {
 
     Write-Report "Release       : $releaseName (build $build)"
     Write-Report "Servicing lane: $edition"
-    Write-Report "End of service: $($eos.ToString('yyyy-MM-dd'))"
-
-    $daysLeft = [int]($eos - (Get-Date)).TotalDays
-
-    if ($daysLeft -lt 0) {
-        Add-Finding -Category 'Servicing' -Severity 'Critical' `
-            -Detail "$releaseName ($edition) reached end of servicing on $($eos.ToString('yyyy-MM-dd')), $([math]::Abs($daysLeft)) days ago. This device no longer receives quality updates, which explains an absence of updates even when everything else is healthy." `
-            -Recommendation 'Upgrade to a serviced Windows release (feature update or in-place upgrade).'
-    } elseif ($daysLeft -le 90) {
-        Add-Finding -Category 'Servicing' -Severity 'Warning' `
-            -Detail "$releaseName ($edition) reaches end of servicing on $($eos.ToString('yyyy-MM-dd')), in $daysLeft days." `
-            -Recommendation 'Plan the feature update before servicing ends.'
-    } else {
-        Add-Finding -Category 'Servicing' -Severity 'OK' `
-            -Detail "$releaseName ($edition) is in servicing until $($eos.ToString('yyyy-MM-dd')) ($daysLeft days remaining)."
-    }
+    Write-ServicingFinding -ReleaseName $releaseName -Edition $edition -Eos $eos
 }
 
 function Test-WuFailureEvents {
@@ -1457,6 +1577,9 @@ function Test-WuFailureEvents {
     if ($latestCode -ne $worstCode) {
         $detail += " Most recent was $latestCode on $($latest.Time.ToString('yyyy-MM-dd HH:mm'))."
     }
+
+    # Signal the log-analysis check that there is something worth digging into.
+    $script:UpdateFailuresDetected = $true
 
     if ($worst.Info.Severity -eq 'Info') {
         Add-Finding -Category 'Update Events' -Severity 'Info' `
@@ -1857,6 +1980,153 @@ function Invoke-SetupDiag {
     }
 }
 
+function Invoke-UpdateLogAnalysis {
+    # Classifies recent CBS/DISM/WindowsUpdate log errors into a probable cause. Gated on real evidence
+    # because decoding WindowsUpdate.log is expensive and writes a temp file.
+    param(
+        [int]$LookbackDays = 14,
+        [bool]$Force = $false
+    )
+
+    Write-Section -Title 'Update Log Analysis'
+
+    if (-not (Test-IsElevated)) {
+        Write-Report 'Skipped: reading CBS/DISM/WindowsUpdate logs requires administrative rights.'
+        Add-Finding -Category 'Log Analysis' -Severity 'Info' `
+            -Detail 'Update log analysis skipped: the script is not running elevated.' `
+            -Recommendation 'Re-run as SYSTEM or an administrator to enable log analysis.'
+        return
+    }
+
+    $attempt = Test-FeatureUpdateAttempted -LookbackDays $LookbackDays
+    if (-not $Force -and -not $script:UpdateFailuresDetected -and -not $attempt.Found) {
+        Write-Report 'Skipped: no recent update failures or servicing attempts detected (use -ForceLogAnalysis to override).'
+        Add-Finding -Category 'Log Analysis' -Severity 'Info' `
+            -Detail 'Update log analysis skipped: no recent update failures or feature-update attempts were detected in the lookback window.'
+        return
+    }
+
+    $cutoff = (Get-Date).AddDays(-$LookbackDays)
+    $hits = New-Object System.Collections.Generic.List[object]
+    $anyLogRead = $false
+
+    $sources = New-Object System.Collections.Generic.List[object]
+    $sources.Add([PSCustomObject]@{ Name = 'CBS.log'; Path = (Join-Path $env:SystemRoot 'Logs\CBS\CBS.log') })
+    $sources.Add([PSCustomObject]@{ Name = 'DISM.log'; Path = (Join-Path $env:SystemRoot 'Logs\DISM\dism.log') })
+
+    # WindowsUpdate.log is ETL-based on Win10+/Server 2016+; decode to a temp file, parse, delete.
+    # Get-WindowsUpdateLog shells out to tracerpt.exe, whose console banner bypasses PowerShell stream
+    # redirection, so run it in a child process with stdout/stderr redirected to throwaway files.
+    $wuDecoded = Join-Path $env:TEMP ('WindowsUpdate_{0}.log' -f ([guid]::NewGuid().ToString('N')))
+    $wuNoiseOut = Join-Path $env:TEMP ('WindowsUpdate_{0}.out' -f ([guid]::NewGuid().ToString('N')))
+    $wuNoiseErr = Join-Path $env:TEMP ('WindowsUpdate_{0}.err' -f ([guid]::NewGuid().ToString('N')))
+    $wuDecodeOk = $false
+    try {
+        if (Get-Command Get-WindowsUpdateLog -ErrorAction SilentlyContinue) {
+            Write-Report 'Decoding WindowsUpdate.log (this can take a moment)...'
+            $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            $proc = Start-Process -FilePath $psExe `
+                -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', "Get-WindowsUpdateLog -LogPath '$wuDecoded'") `
+                -WindowStyle Hidden -PassThru -ErrorAction Stop `
+                -RedirectStandardOutput $wuNoiseOut -RedirectStandardError $wuNoiseErr
+            if (-not $proc.WaitForExit(300000)) {
+                try { $proc.Kill() } catch { Write-Verbose ('Ignored: ' + $_.Exception.Message) }
+                Write-Report 'WindowsUpdate.log decode exceeded its 5 minute time limit and was skipped.'
+            } elseif (Test-Path -LiteralPath $wuDecoded) {
+                $wuDecodeOk = $true
+                $sources.Add([PSCustomObject]@{ Name = 'WindowsUpdate.log'; Path = $wuDecoded })
+            }
+        } else {
+            Write-Report 'Get-WindowsUpdateLog is not available on this system; skipping WindowsUpdate.log decode.'
+        }
+    } catch {
+        Write-Report "WindowsUpdate.log decode failed: $($_.Exception.Message)"
+    } finally {
+        Remove-Item -LiteralPath $wuNoiseOut -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $wuNoiseErr -Force -ErrorAction SilentlyContinue
+    }
+
+    try {
+        foreach ($src in $sources) {
+            if (-not (Test-Path -LiteralPath $src.Path)) {
+                Write-Report "$($src.Name): not found."
+                continue
+            }
+            $anyLogRead = $true
+            $lastWrite = ''
+            try { $lastWrite = (Get-Item -LiteralPath $src.Path -ErrorAction Stop).LastWriteTime } catch { Write-Verbose ('Ignored: ' + $_.Exception.Message) }
+            $errLines = @(Select-UpdateLogLines -Lines (Get-LogTail -Path $src.Path) -Cutoff $cutoff)
+            Write-Report ('{0}: {1} recent error/warning line(s) in the last {2} days (last write {3}).' -f $src.Name, $errLines.Count, $LookbackDays, $lastWrite)
+
+            foreach ($line in $errLines) {
+                $rule = $null
+                foreach ($candidate in $script:LogMarkerMap) {
+                    if ($line -match $candidate.Pattern) { $rule = $candidate; break }
+                }
+                if ($rule) {
+                    $hits.Add([PSCustomObject]@{ Cause = $rule.Cause; Severity = $rule.Severity; Recommendation = $rule.Recommendation; Log = $src.Name; Line = $line.Trim() })
+                } else {
+                    $hits.Add([PSCustomObject]@{ Cause = 'Other'; Severity = 'Warning'; Recommendation = ''; Log = $src.Name; Line = $line.Trim() })
+                }
+            }
+        }
+    } finally {
+        if ($wuDecodeOk) { Remove-Item -LiteralPath $wuDecoded -Force -ErrorAction SilentlyContinue }
+    }
+
+    if (-not $anyLogRead) {
+        Write-Report 'No servicing logs were available to analyze.'
+        Add-Finding -Category 'Log Analysis' -Severity 'Info' -Detail 'Update log analysis found no CBS/DISM/WindowsUpdate logs to read.'
+        return
+    }
+
+    if ($hits.Count -eq 0) {
+        Write-Report 'No error or warning lines found in the servicing logs within the lookback window.'
+        Add-Finding -Category 'Log Analysis' -Severity 'OK' -Detail 'Servicing logs (CBS/DISM/WindowsUpdate) showed no recent errors in the lookback window.'
+        return
+    }
+
+    # Rank known causes by severity, then by how often they appear.
+    $rank = @{ 'OK' = 0; 'Info' = 1; 'Warning' = 2; 'Critical' = 3 }
+    $known = @($hits | Where-Object { $_.Cause -ne 'Other' })
+    $groups = @($known | Group-Object Cause | Sort-Object @{ Expression = { $rank[$_.Group[0].Severity] } }, Count -Descending)
+
+    if ($groups.Count -gt 0) {
+        $top = $groups[0]
+        $samples = @($top.Group | Select-Object -ExpandProperty Line -Unique | Select-Object -First 5)
+        Write-Report ''
+        Write-Report "Probable cause: $($top.Name) ($($top.Count) matching line(s))."
+        foreach ($s in $samples) { Write-Report "    $s" }
+
+        # The specific package/manifest named in the lines is the actionable detail (e.g. a corrupt .mum).
+        $packages = New-Object System.Collections.Generic.List[string]
+        foreach ($l in $top.Group.Line) {
+            foreach ($m in [regex]::Matches([string]$l, '(?i)Package_for_[^\s,";]+|[^\s,";\\/]+\.mum')) {
+                if (-not $packages.Contains($m.Value)) { $packages.Add($m.Value) }
+            }
+        }
+        $namedPackages = @($packages | Select-Object -First 5)
+        if ($namedPackages.Count -gt 0) {
+            Write-Report ('Named package(s)/manifest(s): ' + ($namedPackages -join ', '))
+        }
+
+        $detail = "Servicing logs point to: $($top.Name) ($($top.Count) matching log line(s))."
+        if ($namedPackages.Count -gt 0) { $detail += ' Named component(s): ' + ($namedPackages -join ', ') + '.' }
+        $others = @($groups | Select-Object -Skip 1 | ForEach-Object { "$($_.Name) ($($_.Count))" })
+        if ($others.Count -gt 0) { $detail += ' Also seen: ' + ($others -join ', ') + '.' }
+
+        Add-Finding -Category 'Log Analysis' -Severity $top.Group[0].Severity -Detail $detail -Recommendation $top.Group[0].Recommendation
+    } else {
+        $samples = @($hits | Select-Object -ExpandProperty Line -Unique | Select-Object -First 5)
+        Write-Report ''
+        Write-Report 'Unclassified servicing errors (sample):'
+        foreach ($s in $samples) { Write-Report "    $s" }
+        Add-Finding -Category 'Log Analysis' -Severity 'Warning' `
+            -Detail "Servicing logs contain $($hits.Count) recent error/warning line(s) that did not map to a known cause; review the sample lines in the detailed report." `
+            -Recommendation 'Review CBS.log / DISM.log / WindowsUpdate.log for the specific failing component.'
+    }
+}
+
 #endregion Checks
 
 #region Main
@@ -1876,6 +2146,18 @@ try {
         $script:ShowDetails = [bool]$Detailed
     } else {
         $script:ShowDetails = Get-ScriptVarBool -Name 'detailed' -Default $false
+    }
+
+    # Log-analysis mode (Auto/Skip/Force): explicit -LogAnalysis wins, else the NinjaOne dropdown, else Auto.
+    if ($PSBoundParameters.ContainsKey('LogAnalysis')) {
+        $logAnalysisMode = $LogAnalysis
+    } else {
+        $logAnalysisMode = Get-ScriptVarString -Name 'logAnalysis' -Default 'Auto'
+    }
+    switch -Regex ($logAnalysisMode) {
+        '^(?i)skip$' { $logAnalysisMode = 'Skip' }
+        '^(?i)force$' { $logAnalysisMode = 'Force' }
+        default { $logAnalysisMode = 'Auto' }
     }
 
     Write-Summary 'Windows Update Troubleshooter (diagnostics)'
@@ -1910,6 +2192,13 @@ try {
     }
 
     Test-WuFailureEvents -LookbackDays $lookbackDays
+
+    if ($logAnalysisMode -eq 'Skip') {
+        Write-Section -Title 'Update Log Analysis'
+        Write-Report 'Skipped by Log Analysis = Skip. No logs were read or decoded.'
+    } else {
+        Invoke-UpdateLogAnalysis -LookbackDays $lookbackDays -Force ($logAnalysisMode -eq 'Force')
+    }
 
     if ($SkipSetupDiag) {
         Write-Section -Title 'SetupDiag (feature-update failure analysis)'
